@@ -1,0 +1,19 @@
+[package]
+name = "midnight-impact-rps-example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+midnight-onchain-runtime = { git = "https://github.com/input-output-hk/compactc" }
+midnight-base-crypto = { git = "https://github.com/input-output-hk/midnight-foundations", tag = "base-crypto-0.4", package = "midnight-base-crypto", default-features = false }
+rand = { version = "^0.8.4", features = ["getrandom"] }
+rand_chacha = "^0.3.1"
+
+# [patch.'https://github.com/input-output-hk/midnight-foundations']
+# base-crypto = { path="../midnight-foundations/base-crypto", package = 'midnight-base-crypto' }
+
+# [patch.'https://github.com/input-output-hk/compactc']
+# midnight-onchain-runtime = { path = "../compactc/midnight-onchain-runtime" } 
+
+[dev-dependencies]
+tokio = { version = "1.41.0", features = ["rt", "macros"] }
