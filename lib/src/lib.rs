@@ -5,12 +5,12 @@ use midnight_base_crypto::{
     curve::Fr,
     fab::AlignedValue,
     hash::{persistent_hash, transient_commit, transient_hash},
-    proofs::{ir::Instruction, IrSource},
+    proofs::{ir::Instruction, IrSource, Proof},
     repr::FieldRepr,
 };
 use midnight_onchain_runtime::{
     coin_structure::contract::Address,
-    context::{BlockContext, Effects, QueryContext},
+    context::{BlockContext, Effects, QueryContext, QueryResults},
     cost_model::DUMMY_COST_MODEL,
     ops::{Key, Op},
     result_mode::{ResultModeGather, ResultModeVerify},
@@ -52,25 +52,29 @@ of course).
 The rules of rock papers scissors is only encoded in the circuit.
 */
 
-const INDEX_PLAYER1_VICTORIES: u64 = 0;
-const INDEX_PLAYER2_VICTORIES: u64 = 1;
-const INDEX_TIES: u64 = 2;
+pub const INDEX_PLAYER1_VICTORIES: u64 = 0;
+pub const INDEX_PLAYER2_VICTORIES: u64 = 1;
+pub const INDEX_TIES: u64 = 2;
 
 // the public keys are in the state, initialized at the beginning.
-const INDEX_PLAYER1_PK: u64 = 3;
-const INDEX_PLAYER2_PK: u64 = 4;
+pub const INDEX_PLAYER1_PK: u64 = 3;
+pub const INDEX_PLAYER2_PK: u64 = 4;
 
-const INDEX_PLAYER1_COMMITMENT: u64 = 5;
-const INDEX_PLAYER2_COMMITMENT: u64 = 6;
+pub const INDEX_PLAYER1_COMMITMENT: u64 = 5;
+pub const INDEX_PLAYER2_COMMITMENT: u64 = 6;
 
 // the secrets for authentication
 // this means the players are fixed for this particular example.
-const PLAYER1_SK: [u8; 32] = [2u8; 32];
-const PLAYER2_SK: [u8; 32] = [3u8; 32];
+pub const PLAYER1_SK: [u8; 32] = [2u8; 32];
+pub const PLAYER2_SK: [u8; 32] = [3u8; 32];
 
 // not needed for local evaluation
 pub fn dummy_contract_address() -> Address {
     Address(persistent_hash(&[1, 2, 3]))
+}
+
+pub fn dummy_fee_payer_address() -> Address {
+    Address(persistent_hash(&[1, 2, 3, 4]))
 }
 
 pub fn initial_query_context() -> QueryContext {
@@ -265,18 +269,6 @@ fn commit_to_value_program(
     .to_vec()
 }
 
-fn run_add_commitment(
-    pk_index: u64,
-    state: StateValue,
-    commitment: AlignedValue,
-) -> (Vec<Op<ResultModeVerify>>, StateValue) {
-    let query_context = QueryContext::new(state, dummy_contract_address());
-
-    let program = commit_to_value_program(Some(pk_index), Some(commitment));
-
-    get_transcript(query_context, program)
-}
-
 // inputs are optional to allow generating the vk with dummy values (since the
 // vk shouldn't depend on those, otherwise you could only make a single contract
 // call)
@@ -337,6 +329,7 @@ fn open_commitments_program(winner: Option<Fr>) -> Vec<Op<ResultModeGather>> {
             cached: false,
             n: 1,
         },
+        // we increment the value at the index: winner (INDEX_PLAYER1_VICTORIES | INDEX_PLAYER2_VICTORIES | INDEX_TIES).
         Op::Push {
             storage: false,
             value: StateValue::Cell(Arc::new(AlignedValue::from(winner.unwrap_or(Fr::from(0))))),
@@ -357,17 +350,6 @@ fn open_commitments_program(winner: Option<Fr>) -> Vec<Op<ResultModeGather>> {
         },
     ]
     .to_vec()
-}
-
-pub fn run_open_commitments_program(
-    state: StateValue,
-    winner: Fr,
-) -> (Vec<Op<ResultModeVerify>>, StateValue) {
-    let query_context = QueryContext::new(state, dummy_contract_address());
-
-    let program = open_commitments_program(Some(winner));
-
-    get_transcript(query_context, program)
 }
 
 fn build_ir_for_add_commitment(
@@ -402,6 +384,8 @@ fn build_ir_for_add_commitment(
                     // i - 1 is the index of the last private input (the random part of the commitment)
                     // i - 2 is the commited value
                     // i - 3 is the public key
+                    //
+                    // First we check authentication
                     Instruction::TransientHash {
                         inputs: vec![i - 3],
                     }, // i
@@ -455,55 +439,6 @@ fn build_ir_for_add_commitment(
     }
 }
 
-fn add_commitment_encode_params(
-    address: [u8; 32],
-    program: Vec<Op<ResultModeVerify>>,
-    pk_index: u64,
-    commitment: AlignedValue,
-    opening: (Fr, Fr),
-) -> (Vec<Fr>, Vec<Fr>, Vec<Fr>, Vec<Fr>) {
-    let mut inputs = vec![];
-
-    AlignedValue::from(Fr::from(pk_index)).value_only_field_repr(&mut inputs);
-    AlignedValue::from(Fr::from(
-        pk_index + INDEX_PLAYER1_COMMITMENT - INDEX_PLAYER1_PK,
-    ))
-    .value_only_field_repr(&mut inputs);
-    commitment.value_only_field_repr(&mut inputs);
-
-    dbg!(&inputs);
-
-    let mut public_transcript_inputs = vec![];
-    let mut public_transcript_outputs = vec![];
-
-    let mut private_transcript: Vec<Fr> = vec![];
-
-    AlignedValue::from(address).value_only_field_repr(&mut private_transcript);
-    private_transcript.push(opening.0);
-    private_transcript.push(opening.1);
-
-    dbg!(&private_transcript);
-
-    for op in &program {
-        op.field_repr(&mut public_transcript_inputs);
-
-        if let Op::Popeq { cached: _, result } = op {
-            result.value_only_field_repr(&mut public_transcript_outputs);
-        }
-    }
-
-    dbg!(&public_transcript_inputs);
-
-    dbg!(&public_transcript_outputs);
-
-    (
-        inputs,
-        public_transcript_inputs,
-        public_transcript_outputs,
-        private_transcript,
-    )
-}
-
 fn build_ir_for_open_commitments(
     num_private_inputs: u32,
     pushed_inputs: HashSet<usize>,
@@ -514,8 +449,6 @@ fn build_ir_for_open_commitments(
     for op in &program {
         op.field_repr(&mut public_transcript_inputs);
     }
-
-    dbg!(&public_transcript_inputs);
 
     let num_inputs = pushed_inputs.len() as u32;
 
@@ -558,6 +491,7 @@ fn build_ir_for_open_commitments(
                         // the second popeq
                         b: output_indexes[1],
                     },
+                    // game logic
                     // both values are the same (rocks - rocks, scissors - scissors, paper - paper)
                     Instruction::TestEq { a: i - 2, b: i - 4 }, // i + 2
                     Instruction::LoadImm {
@@ -623,7 +557,206 @@ fn build_ir_for_open_commitments(
     }
 }
 
-fn open_commitments_encode_params(
+// pub fn build_ir_for_open_commitments_rust(
+//     num_private_inputs: u32,
+//     pushed_inputs: HashSet<usize>,
+//     program: Vec<Op<ResultModeVerify>>,
+// ) -> IrSource {
+//     let mut public_transcript_inputs = vec![];
+
+//     for op in &program {
+//         op.field_repr(&mut public_transcript_inputs);
+//     }
+
+//     let num_inputs = pushed_inputs.len() as u32;
+
+//     let (pis, mut i, _dedup, output_indexes) = gen_transcript_constraints(program, pushed_inputs);
+
+//     let mut instructions = pis;
+
+//     for _ in 0..num_private_inputs {
+//         instructions.push(Instruction::PrivateInput { guard: None });
+//         i += 1;
+//     }
+
+//     IrSource {
+//         num_inputs,
+//         do_communications_commitment: false,
+//         instructions: Arc::new(
+//             instructions
+//                 .into_iter()
+//                 .chain(vec![
+//                     // i - 1 is the index of the last private input (the random part of the second commitment)
+//                     // i - 2 is the index of the last private input (the value part of the second commitment)
+
+//                     // i - 3 is the index of the last private input (the random part of the first commitment)
+//                     // i - 4 is the index of the last private input (the value part of the first commitment)
+//                     Instruction::TransientHash {
+//                         // the random part goes before
+//                         inputs: vec![i - 3, i - 4],
+//                     }, // i
+//                     Instruction::TransientHash {
+//                         // the random part goes before
+//                         inputs: vec![i - 1, i - 2],
+//                     }, // i + 1
+//                     Instruction::ConstrainEq {
+//                         a: i,
+//                         // the first popeq
+//                         b: output_indexes[0],
+//                     },
+//                     Instruction::ConstrainEq {
+//                         a: i + 1,
+//                         // the second popeq
+//                         b: output_indexes[1],
+//                     },
+//                     // This checks the game logic in Rust.
+//                     // The final goal would be probably to replace the IR
+//                     // completely, but this works as an intermediate step.
+//                     Instruction::RocksPaperScissors {
+//                         a: i - 4,
+//                         b: i - 2,
+//                         // public input.
+//                         winner: 0,
+//                     },
+//                 ])
+//                 .collect(),
+//         ),
+//     }
+// }
+
+/// Play a single round.
+/// This means:
+///   1. Each player commits
+///   2. Both commits are opened
+///
+/// This takes and return the state so that multiple rounds can be chained.
+pub async fn play_round(
+    rng: &mut ChaCha20Rng,
+    current_state: StateValue,
+    commit_ir: (IrSource, ProofParams),
+    open_ir: (IrSource, ProofParams),
+    value1: Fr,
+    value2: Fr,
+    // could be computed from the values, but left as a variable since it's
+    // useful to test the failing case.
+    winner: Fr,
+) -> (StateValue, [Proof; 3]) {
+    let opening1: Fr = rng.gen();
+
+    let commitment: AlignedValue = transient_commit(&value1, opening1).into();
+    let (transcript, query_result) =
+        run_add_commitment(INDEX_PLAYER1_PK, current_state, commitment.clone());
+
+    let (inputs, public_transcript_inputs, public_transcript_outputs, private_transcript) =
+        add_commitment_encode_params(
+            PLAYER1_SK,
+            transcript,
+            INDEX_PLAYER1_PK,
+            commitment,
+            (value1, opening1),
+        );
+
+    let proof1 = gen_proof_and_check(
+        commit_ir.0.clone(),
+        inputs,
+        private_transcript,
+        public_transcript_inputs,
+        public_transcript_outputs,
+        commit_ir.1.clone(),
+    )
+    .await;
+
+    let opening2: Fr = rng.gen();
+
+    let commitment: AlignedValue = transient_commit(&value2, opening2).into();
+    let (transcript, query_result) = run_add_commitment(
+        INDEX_PLAYER2_PK,
+        query_result.context.state,
+        commitment.clone(),
+    );
+
+    let (inputs, public_transcript_inputs, public_transcript_outputs, private_transcript) =
+        add_commitment_encode_params(
+            PLAYER2_SK,
+            transcript,
+            INDEX_PLAYER2_PK,
+            commitment,
+            (value2, opening2),
+        );
+
+    let proof2 = gen_proof_and_check(
+        commit_ir.0,
+        inputs,
+        private_transcript,
+        public_transcript_inputs,
+        public_transcript_outputs,
+        commit_ir.1.clone(),
+    )
+    .await;
+
+    let (transcript, query_result) =
+        run_open_commitments_program(query_result.context.state, winner);
+
+    let (inputs, public_transcript_inputs, public_transcript_outputs, private_transcript) =
+        open_commitments_encode_params(transcript, (value1, opening1), (value2, opening2), winner);
+
+    let proof3 = gen_proof_and_check(
+        open_ir.0,
+        inputs,
+        private_transcript,
+        public_transcript_inputs,
+        public_transcript_outputs,
+        open_ir.1.clone(),
+    )
+    .await;
+
+    (query_result.context.state, [proof1, proof2, proof3])
+}
+
+// encodes the inputs and private params
+pub fn add_commitment_encode_params(
+    address: [u8; 32],
+    program: Vec<Op<ResultModeVerify>>,
+    pk_index: u64,
+    commitment: AlignedValue,
+    opening: (Fr, Fr),
+) -> (Vec<Fr>, Vec<Fr>, Vec<Fr>, Vec<Fr>) {
+    let mut inputs = vec![];
+
+    AlignedValue::from(Fr::from(pk_index)).value_only_field_repr(&mut inputs);
+    AlignedValue::from(Fr::from(
+        pk_index + INDEX_PLAYER1_COMMITMENT - INDEX_PLAYER1_PK,
+    ))
+    .value_only_field_repr(&mut inputs);
+    commitment.value_only_field_repr(&mut inputs);
+
+    let mut public_transcript_inputs = vec![];
+    let mut public_transcript_outputs = vec![];
+
+    let mut private_transcript: Vec<Fr> = vec![];
+
+    AlignedValue::from(address).value_only_field_repr(&mut private_transcript);
+    private_transcript.push(opening.0);
+    private_transcript.push(opening.1);
+
+    for op in &program {
+        op.field_repr(&mut public_transcript_inputs);
+
+        if let Op::Popeq { cached: _, result } = op {
+            result.value_only_field_repr(&mut public_transcript_outputs);
+        }
+    }
+
+    (
+        inputs,
+        public_transcript_inputs,
+        public_transcript_outputs,
+        private_transcript,
+    )
+}
+
+// encodes the inputs and private params
+pub fn open_commitments_encode_params(
     program: Vec<Op<ResultModeVerify>>,
     opening1: (Fr, Fr),
     opening2: (Fr, Fr),
@@ -636,8 +769,6 @@ fn open_commitments_encode_params(
 
     let private_transcript = vec![opening1.0, opening1.1, opening2.0, opening2.1];
 
-    dbg!(&private_transcript);
-
     for op in &program {
         op.field_repr(&mut public_transcript_inputs);
 
@@ -645,10 +776,6 @@ fn open_commitments_encode_params(
             result.value_only_field_repr(&mut public_transcript_outputs);
         }
     }
-
-    dbg!(&public_transcript_inputs);
-
-    dbg!(&public_transcript_outputs);
 
     (
         inputs,
@@ -699,88 +826,44 @@ pub fn make_openings_circuit() -> IrSource {
     )
 }
 
-pub async fn play_round(
-    rng: &mut ChaCha20Rng,
-    current_state: StateValue,
-    commit_ir: (IrSource, ProofParams),
-    open_ir: (IrSource, ProofParams),
-    value1: Fr,
-    value2: Fr,
-    // could be computed from the values, but left as a variable since it's
-    // useful to test the failing case.
+pub fn run_add_commitment(
+    pk_index: u64,
+    state: StateValue,
+    commitment: AlignedValue,
+) -> (Vec<Op<ResultModeVerify>>, QueryResults<ResultModeGather>) {
+    let query_context = QueryContext::new(state, dummy_contract_address());
+
+    let program = commit_to_value_program(Some(pk_index), Some(commitment));
+
+    get_transcript(query_context, program)
+}
+
+pub fn run_open_commitments_program(
+    state: StateValue,
     winner: Fr,
-) -> StateValue {
-    let opening1: Fr = rng.gen();
+) -> (Vec<Op<ResultModeVerify>>, QueryResults<ResultModeGather>) {
+    let query_context = QueryContext::new(state, dummy_contract_address());
 
-    let commitment: AlignedValue = transient_commit(&value1, opening1).into();
-    let (transcript, state) =
-        run_add_commitment(INDEX_PLAYER1_PK, current_state, commitment.clone());
+    let program = open_commitments_program(Some(winner));
 
-    let (inputs, public_transcript_inputs, public_transcript_outputs, private_transcript) =
-        add_commitment_encode_params(
-            PLAYER1_SK,
-            transcript,
-            INDEX_PLAYER1_PK,
-            commitment,
-            (value1, opening1),
-        );
-
-    gen_proof_and_check(
-        commit_ir.0.clone(),
-        inputs,
-        private_transcript,
-        public_transcript_inputs,
-        public_transcript_outputs,
-        commit_ir.1.clone(),
-    )
-    .await;
-
-    let opening2: Fr = rng.gen();
-
-    let commitment: AlignedValue = transient_commit(&value2, opening2).into();
-    let (transcript, state) = run_add_commitment(INDEX_PLAYER2_PK, state, commitment.clone());
-
-    let (inputs, public_transcript_inputs, public_transcript_outputs, private_transcript) =
-        add_commitment_encode_params(
-            PLAYER2_SK,
-            transcript,
-            INDEX_PLAYER2_PK,
-            commitment,
-            (value2, opening2),
-        );
-
-    gen_proof_and_check(
-        commit_ir.0,
-        inputs,
-        private_transcript,
-        public_transcript_inputs,
-        public_transcript_outputs,
-        commit_ir.1.clone(),
-    )
-    .await;
-
-    let (transcript, state) = run_open_commitments_program(state, winner);
-
-    let (inputs, public_transcript_inputs, public_transcript_outputs, private_transcript) =
-        open_commitments_encode_params(transcript, (value1, opening1), (value2, opening2), winner);
-
-    gen_proof_and_check(
-        open_ir.0,
-        inputs,
-        private_transcript,
-        public_transcript_inputs,
-        public_transcript_outputs,
-        open_ir.1.clone(),
-    )
-    .await;
-
-    state
+    get_transcript(query_context, program)
 }
 
 #[cfg(test)]
 mod tests {
     use common::keygen;
-    use rand::SeedableRng as _;
+    use midnight_base_crypto::proofs::{KeyLocation, ProofPreimage, ProverKey, VerifierKey};
+    use midnight_ledger::{
+        coin_structure::coin::NATIVE_TOKEN,
+        construct::ContractCallPrototype,
+        serialize::{deserialize, NetworkId},
+        structure::{ContractCalls, Transaction, DUMMY_PARAMETERS},
+        zswap::{Offer, Output},
+    };
+    use midnight_onchain_runtime::transcript::Transcript;
+    use midnight_zswap::AuthorizedMint;
+    use rand::{rngs::OsRng, SeedableRng as _};
+    use std::{borrow::Cow, io::Cursor};
 
     use super::*;
 
@@ -798,12 +881,12 @@ mod tests {
         let mut rng = ChaCha20Rng::from_seed([41; 32]);
 
         // scissors
-        let value1 = Fr::from(2);
+        let value1 = Fr::from(1);
         // rocks
-        let value2 = Fr::from(0);
+        let value2 = Fr::from(2);
         let winner = Fr::from(INDEX_PLAYER2_VICTORIES);
 
-        let state = play_round(
+        let (state, _) = play_round(
             &mut rng,
             state,
             (commit_ir.clone(), commit_proof_params.clone()),
@@ -820,7 +903,7 @@ mod tests {
         let value2 = Fr::from(2);
         let winner = Fr::from(INDEX_PLAYER1_VICTORIES);
 
-        let state = play_round(
+        let (state, _) = play_round(
             &mut rng,
             state,
             (commit_ir.clone(), commit_proof_params.clone()),
@@ -837,7 +920,7 @@ mod tests {
         let value2 = Fr::from(1);
         let winner = Fr::from(INDEX_TIES);
 
-        let state = play_round(
+        let (state, _) = play_round(
             &mut rng,
             state,
             (commit_ir, commit_proof_params),
@@ -865,5 +948,214 @@ mod tests {
                 _ => unreachable!(),
             }
         }
+    }
+
+    const OUTPUT_VK_RAW: &[u8] = include_bytes!(concat!(
+        env!("MIDNIGHT_LEDGER_STATIC_DIR"),
+        "/zswap/keys/output.verifier"
+    ));
+
+    const OUTPUT_PK_RAW: &[u8] = include_bytes!(concat!(
+        env!("MIDNIGHT_LEDGER_STATIC_DIR"),
+        "/zswap/keys/output.prover"
+    ));
+
+    const OUTPUT_IR_RAW: &[u8] = include_bytes!(concat!(
+        env!("MIDNIGHT_LEDGER_STATIC_DIR"),
+        "/zswap/zkir/output.zkir"
+    ));
+
+    const SPEND_VK_RAW: &[u8] = include_bytes!(concat!(
+        env!("MIDNIGHT_LEDGER_STATIC_DIR"),
+        "/zswap/keys/spend.verifier"
+    ));
+
+    const SPEND_PK_RAW: &[u8] = include_bytes!(concat!(
+        env!("MIDNIGHT_LEDGER_STATIC_DIR"),
+        "/zswap/keys/spend.prover"
+    ));
+
+    const SPEND_IR_RAW: &[u8] = include_bytes!(concat!(
+        env!("MIDNIGHT_LEDGER_STATIC_DIR"),
+        "/zswap/zkir/spend.zkir"
+    ));
+
+    const SIGN_VK_RAW: &[u8] = include_bytes!(concat!(
+        env!("MIDNIGHT_LEDGER_STATIC_DIR"),
+        "/zswap/keys/sign.verifier"
+    ));
+
+    const SIGN_PK_RAW: &[u8] = include_bytes!(concat!(
+        env!("MIDNIGHT_LEDGER_STATIC_DIR"),
+        "/zswap/keys/sign.prover"
+    ));
+
+    const SIGN_IR_RAW: &[u8] = include_bytes!(concat!(
+        env!("MIDNIGHT_LEDGER_STATIC_DIR"),
+        "/zswap/zkir/sign.zkir"
+    ));
+
+    pub fn decode_zswap_proof_params(
+        pk: &[u8],
+        vk: &[u8],
+        ir: &[u8],
+    ) -> (ProverKey, VerifierKey, IrSource) {
+        let pk = deserialize::<ProverKey, _>(Cursor::new(pk), NetworkId::Undeployed).unwrap();
+        let vk = deserialize::<VerifierKey, _>(Cursor::new(vk), NetworkId::Undeployed).unwrap();
+        let ir = IrSource::load(Cursor::new(ir)).unwrap();
+
+        (pk, vk, ir)
+    }
+
+    #[tokio::test]
+    pub async fn test_tx_creation() {
+        let commit_ir = make_add_commitments_circuit();
+        let commit_proof_params = keygen(&commit_ir).await;
+        assert!(!commit_ir.do_communications_commitment);
+
+        let spend = decode_zswap_proof_params(SPEND_PK_RAW, SPEND_VK_RAW, SPEND_IR_RAW);
+        let output = decode_zswap_proof_params(OUTPUT_PK_RAW, OUTPUT_VK_RAW, OUTPUT_IR_RAW);
+        let sign = decode_zswap_proof_params(SIGN_PK_RAW, SIGN_VK_RAW, SIGN_IR_RAW);
+
+        let start = std::time::Instant::now();
+
+        let (sk, index) = (PLAYER1_SK, INDEX_PLAYER1_PK);
+
+        let value_fr = Fr::from(0);
+        let opening = OsRng.gen();
+        let commitment: AlignedValue = transient_commit(&value_fr, opening).into();
+
+        let state = initial_state();
+
+        let (transcript, query_result) =
+            run_add_commitment(index, state.context.state, commitment.clone());
+
+        let (inputs, _public_transcript_inputs, _public_transcript_outputs, private_transcript) =
+            add_commitment_encode_params(
+                sk,
+                transcript.clone(),
+                index,
+                commitment,
+                (value_fr, opening),
+            );
+
+        let guaranted_coins = Offer {
+            inputs: vec![],
+            outputs: vec![],
+            transient: vec![],
+            deltas: vec![],
+        };
+        let fallible_coins = None;
+
+        let cc = ContractCalls::new(&mut OsRng);
+
+        let inputs_aligned = inputs
+            .iter()
+            .map(|fr| AlignedValue::from(*fr))
+            .collect::<Vec<_>>();
+
+        let input = AlignedValue::concat(&inputs_aligned);
+
+        let cc = cc.add_call(ContractCallPrototype {
+            address: dummy_contract_address(),
+            entry_point: state::EntryPointBuf("commit_to_value".to_string().into_bytes()),
+            op: ContractOperation::new(None),
+            guaranteed_public_transcript: Some(Transcript {
+                gas: query_result.gas_cost,
+                effects: query_result.context.effects,
+                program: transcript,
+            }),
+            fallible_public_transcript: None,
+            private_transcript_outputs: private_transcript
+                .iter()
+                .map(|fr| AlignedValue::from(*fr))
+                .collect(),
+            input,
+            output: AlignedValue::concat(vec![]),
+            communication_commitment_rand: OsRng.gen(),
+            key_location: KeyLocation(Cow::Borrowed("builtin")),
+        });
+
+        let unproven_tx: Transaction<ProofPreimage> =
+            Transaction::new(guaranted_coins, fallible_coins, Some(cc.clone()));
+
+        let call_resolver = (
+            commit_proof_params.pk.clone(),
+            commit_proof_params.vk.clone(),
+            commit_ir.clone(),
+        );
+
+        let unbalanced_tx = unproven_tx
+            .prove(OsRng, &commit_proof_params.pp, |loc| match &*loc.0 {
+                "midnight/zswap/spend" => Some(spend.clone()),
+                "midnight/zswap/output" => Some(output.clone()),
+                "midnight/zswap/sign" => Some(sign.clone()),
+                _ => Some(call_resolver.clone()),
+            })
+            .await
+            .unwrap();
+
+        let fees = unbalanced_tx.fees(&DUMMY_PARAMETERS).unwrap();
+
+        println!("Took: {}", start.elapsed().as_millis());
+
+        let zswap_state = midnight_zswap::local::State::new(&mut OsRng);
+
+        let nonce = OsRng.gen();
+        let mint_info = coin_structure::coin::Info {
+            nonce,
+            type_: NATIVE_TOKEN,
+            value: 10000,
+        };
+        let secret_key = coin_structure::coin::SecretKey(persistent_hash(&[1, 2, 3, 4, 5]));
+        let zswap_state = zswap_state.apply_mint(
+            &AuthorizedMint::<ProofPreimage>::new(&mut OsRng, mint_info, &secret_key).unwrap(),
+        );
+
+        let (_state, input) = zswap_state
+            .spend(
+                &mut OsRng,
+                &coin_structure::coin::QualifiedInfo {
+                    nonce,
+                    type_: NATIVE_TOKEN,
+                    value: 10000,
+                    mt_index: 0,
+                },
+            )
+            .unwrap();
+
+        let guaranted_coins = Offer {
+            inputs: vec![input],
+            outputs: vec![Output::new(
+                &mut OsRng,
+                &coin_structure::coin::Info {
+                    nonce: OsRng.gen(),
+                    type_: NATIVE_TOKEN,
+                    value: fees,
+                },
+                &secret_key.public_key(),
+                None,
+            )
+            .unwrap()],
+            transient: vec![],
+            deltas: vec![(NATIVE_TOKEN, fees as i128)],
+        };
+
+        let fallible_coins = None;
+
+        let balanced_tx: Transaction<ProofPreimage> =
+            Transaction::new(guaranted_coins, fallible_coins, Some(cc));
+
+        let balanced_tx = balanced_tx
+            .prove(OsRng, &commit_proof_params.pp, |loc| match dbg!(&*loc.0) {
+                "midnight/zswap/spend" => Some(spend.clone()),
+                "midnight/zswap/output" => Some(output.clone()),
+                "midnight/zswap/sign" => Some(sign.clone()),
+                _ => Some(call_resolver.clone()),
+            })
+            .await
+            .unwrap();
+
+        dbg!(balanced_tx.imbalances(true, Some(fees)));
     }
 }

@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+Cargo.lock
+pkg/
+wasm-pack.log
+
+pk_add_commitments
+pk_open_commitments
+vk_add_commitments
+vk_open_commitments

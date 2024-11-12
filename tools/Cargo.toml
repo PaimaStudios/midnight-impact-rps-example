@@ -1,0 +1,9 @@
+[package]
+name = "tools"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+midnight-impact-rps-example = { path = "../lib" }
+tokio = { workspace = true }
+midnight-base-crypto = { workspace = true }

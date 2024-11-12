@@ -1,0 +1,8 @@
+make:
+    wasm-pack build --dev --target web -d www/pkg
+
+make_release:
+    RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals' \
+      rustup run nightly-2024-08-02 \
+      wasm-pack build --release --target web . -d www/pkg \
+      -- -Z build-std=panic_abort,std

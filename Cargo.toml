@@ -1,19 +1,31 @@
-[package]
-name = "midnight-impact-rps-example"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+resolver = "2"
+members = [
+    "lib",
+    "tools",
+    "wasm",
+]
 
-[dependencies]
+[workspace.dependencies]
+# midnight deps
 midnight-onchain-runtime = { git = "https://github.com/input-output-hk/compactc" }
 midnight-base-crypto = { git = "https://github.com/input-output-hk/midnight-foundations", tag = "base-crypto-0.4", package = "midnight-base-crypto", default-features = false }
+midnight-ledger = { git = "https://github.com/input-output-hk/midnight-ledger-prototype", default-features = false, features = ["transaction-construction", "verifying", "serde", "transaction-semantics", "proving"] }
+coin-structure = { git = "https://github.com/input-output-hk/midnight-foundations", tag = "coin-structure-0.2", package = "midnight-coin-structure" }
+midnight-zswap = { path = "../midnight-ledger-prototype/zswap", features = ["offer-construction"] }
+midnight-swap = { git = "https://github.com/input-output-hk/midnight-ledger-prototype", features = ["offer-construction"] }
+
+# other deps
 rand = { version = "^0.8.4", features = ["getrandom"] }
 rand_chacha = "^0.3.1"
-
-# [patch.'https://github.com/input-output-hk/midnight-foundations']
-# base-crypto = { path="../midnight-foundations/base-crypto", package = 'midnight-base-crypto' }
-
-# [patch.'https://github.com/input-output-hk/compactc']
-# midnight-onchain-runtime = { path = "../compactc/midnight-onchain-runtime" } 
-
-[dev-dependencies]
 tokio = { version = "1.41.0", features = ["rt", "macros"] }
+
+[patch.'https://github.com/input-output-hk/midnight-ledger-prototype']
+midnight-ledger = { path = "../midnight-ledger-prototype/ledger" }
+midnight-zswap = { path = "../midnight-ledger-prototype/zswap" }
+
+[patch.'https://github.com/input-output-hk/midnight-foundations']
+base-crypto = { path = "../midnight-foundations/base-crypto", package = 'midnight-base-crypto' }
+
+[patch.'https://github.com/input-output-hk/compactc']
+midnight-onchain-runtime = { path = "../compactc/midnight-onchain-runtime" } 

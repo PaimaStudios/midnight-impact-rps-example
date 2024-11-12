@@ -1,17 +1,16 @@
 use midnight_base_crypto::{
     curve::Fr,
     proofs::{
-        ir::Instruction, IrSource, KeyLocation, ParamsProver, ParamsVerifier, ProofPreimage,
-        ProverKey, VerifierKey,
+        ir::Instruction, IrSource, KeyLocation, ParamsProver, Proof, ProofPreimage, ProverKey,
+        VerifierKey,
     },
     repr::FieldRepr as _,
 };
 use midnight_onchain_runtime::{
-    context::QueryContext,
+    context::{QueryContext, QueryResults},
     cost_model::DUMMY_COST_MODEL,
     ops::Op,
     result_mode::{GatherEvent, ResultModeGather, ResultModeVerify},
-    state::StateValue,
 };
 use rand::SeedableRng as _;
 use rand_chacha::ChaCha20Rng;
@@ -26,7 +25,7 @@ use std::{
 pub fn get_transcript(
     query_context: QueryContext,
     program: Vec<Op<ResultModeGather>>,
-) -> (Vec<Op<ResultModeVerify>>, StateValue) {
+) -> (Vec<Op<ResultModeVerify>>, QueryResults<ResultModeGather>) {
     let new_context = query_context
         .query::<ResultModeGather>(&program, None, &DUMMY_COST_MODEL)
         .unwrap();
@@ -43,7 +42,7 @@ pub fn get_transcript(
             .into_iter()
             .map(|op| op.translate(|_| reads.pop().unwrap().clone()))
             .collect(),
-        new_context.context.state,
+        new_context,
     )
 }
 
@@ -99,9 +98,9 @@ pub fn gen_transcript_constraints(
         match op {
             Op::Push { .. } => {
                 for _ in &repr[upto..] {
-                    pis.extend_from_slice(&[dbg!(Instruction::DeclarePubInput {
+                    pis.extend_from_slice(&[Instruction::DeclarePubInput {
                         var: consumed_inputs,
-                    })]);
+                    }]);
                     consumed_inputs += 1;
                 }
             }
@@ -131,10 +130,10 @@ pub fn gen_transcript_constraints(
 
 #[derive(Clone)]
 pub struct ProofParams {
-    pp: ParamsProver,
-    vp: ParamsVerifier,
-    pk: ProverKey,
-    vk: VerifierKey,
+    pub pp: ParamsProver,
+    // pub vp: ParamsVerifier,
+    pub pk: ProverKey,
+    pub vk: VerifierKey,
 }
 
 pub async fn gen_proof_and_check(
@@ -144,8 +143,8 @@ pub async fn gen_proof_and_check(
     public_transcript_inputs: Vec<Fr>,
     public_transcript_outputs: Vec<Fr>,
     proof_params: ProofParams,
-) {
-    let ProofParams { pp, vp, pk, vk } = proof_params;
+) -> Proof {
+    let ProofParams { pp, pk, vk } = proof_params;
 
     // This is a hash of:
     //  - The contract address
@@ -164,6 +163,7 @@ pub async fn gen_proof_and_check(
         public_transcript_outputs: public_transcript_outputs.clone(),
         key_location: KeyLocation(Cow::Borrowed("builtin")),
     };
+
     let (proof, _) = preimage
         .prove(&mut ChaCha20Rng::from_seed([42; 32]), &pp, |_| {
             Some((pk.clone(), vk.clone(), ir.clone()))
@@ -171,27 +171,26 @@ pub async fn gen_proof_and_check(
         .await
         .unwrap();
 
-    // I think this is already done inside of prove anyway, but whatever
-    vk.verify(
-        &vp,
-        &proof,
-        [binding_input].into_iter().chain(public_transcript_inputs),
-    )
-    .unwrap();
+    // // I think this is already done inside of prove anyway, but whatever
+    // vk.verify(
+    //     &vp,
+    //     &proof,
+    //     [binding_input].into_iter().chain(public_transcript_inputs),
+    // )
+    // .unwrap();
+
+    proof
 }
 
 pub async fn keygen(ir: &IrSource) -> ProofParams {
-    let mut pp = ParamsProver::read(BufReader::new(
-        File::open("kzg")
-            .expect("kzg params not found, run: cargo run --bin make_params to generate new ones"),
-    ))
+    let pp = concat!(env!("MIDNIGHT_LEDGER_STATIC_DIR"), "/kzg");
+
+    let pp = ParamsProver::read(BufReader::new(File::open(pp).expect(
+        "kzg params not found, run: cargo run --bin make_params to generate new ones",
+    )))
     .unwrap();
-
-    pp = pp.downsize(ir.model(None).k());
-
-    let vp = ParamsVerifier::read(BufReader::new(File::open("kzg.vp").unwrap())).unwrap();
 
     let (pk, vk) = ir.keygen(&pp).await.unwrap();
 
-    ProofParams { pp, vp, pk, vk }
+    ProofParams { pp, pk, vk }
 }
