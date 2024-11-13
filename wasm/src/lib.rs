@@ -4,7 +4,7 @@ mod utils;
 use midnight_base_crypto::{
     curve::Fr,
     fab::AlignedValue,
-    hash::transient_commit,
+    hash::{transient_commit, transient_hash},
     proofs::{IrSource, KeyLocation, ParamsProver, ProofPreimage, ProverKey, VerifierKey},
     serialize::{deserialize, serialize, NetworkId},
 };
@@ -13,7 +13,7 @@ use midnight_impact_rps_example::{
     common::{gen_proof_and_check, ProofParams},
     dummy_contract_address, initial_state, make_add_commitments_circuit, make_openings_circuit,
     open_commitments_encode_params, run_open_commitments_program, INDEX_PLAYER1_PK,
-    INDEX_PLAYER1_VICTORIES, INDEX_PLAYER2_PK, INDEX_TIES, PLAYER1_SK, PLAYER2_SK,
+    INDEX_PLAYER1_VICTORIES, INDEX_PLAYER2_PK, INDEX_TIES,
 };
 use midnight_impact_rps_example::{run_add_commitment, INDEX_PLAYER2_VICTORIES};
 use midnight_ledger::{
@@ -187,8 +187,27 @@ pub struct Context {
 }
 
 #[wasm_bindgen]
+pub struct PlayerSk([u8; 32]);
+
+#[wasm_bindgen]
+impl PlayerSk {
+    pub fn to_public(&self) -> PlayerPk {
+        let hashed = {
+            let mut address_repr = vec![];
+            AlignedValue::from(self.0).value_only_field_repr(&mut address_repr);
+            transient_hash(&address_repr)
+        };
+
+        PlayerPk(hashed)
+    }
+}
+
+#[wasm_bindgen]
+pub struct PlayerPk(Fr);
+
+#[wasm_bindgen]
 impl Context {
-    pub fn new() -> Self {
+    pub fn new(pk1: &PlayerPk, pk2: &PlayerPk) -> Self {
         let commit_ir = make_add_commitments_circuit();
 
         let commit_proof_params = decode_proof_params(PK_ADD_COMMITMENTS, VK_ADD_COMMITMENTS);
@@ -196,7 +215,7 @@ impl Context {
         let open_ir = make_openings_circuit();
         let open_proof_params = decode_proof_params(PK_OPEN_COMMITMENTS, VK_OPEN_COMMITMENTS);
 
-        let state = initial_state().context.state;
+        let state = initial_state(pk1.0, pk2.0).context.state;
 
         let spend = decode_zswap_proof_params(SPEND_PK_RAW, SPEND_VK_RAW, SPEND_IR_RAW);
         let output = decode_zswap_proof_params(OUTPUT_PK_RAW, OUTPUT_VK_RAW, OUTPUT_IR_RAW);
@@ -215,13 +234,14 @@ impl Context {
     pub async fn commit_to_value(
         &mut self,
         player: Player,
+        sk: &PlayerSk,
         value: RpsInput,
         opening: &FrValue,
         generate_proof: bool,
     ) -> Result<Uint8Array, JsError> {
-        let (sk, index) = match player {
-            Player::P1 => (PLAYER1_SK, INDEX_PLAYER1_PK),
-            Player::P2 => (PLAYER2_SK, INDEX_PLAYER2_PK),
+        let index = match player {
+            Player::P1 => INDEX_PLAYER1_PK,
+            Player::P2 => INDEX_PLAYER2_PK,
         };
 
         let value_fr = Fr::from(value as u64);
@@ -231,7 +251,7 @@ impl Context {
 
         let (inputs, _public_transcript_inputs, _public_transcript_outputs, private_transcript) =
             add_commitment_encode_params(
-                sk,
+                sk.0,
                 transcript.clone(),
                 index,
                 commitment,

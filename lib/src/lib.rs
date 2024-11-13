@@ -1,11 +1,11 @@
 pub mod common;
 
-use common::{gen_proof_and_check, gen_transcript_constraints, get_transcript, ProofParams};
+use common::{gen_transcript_constraints, get_transcript};
 use midnight_base_crypto::{
     curve::Fr,
     fab::AlignedValue,
-    hash::{persistent_hash, transient_commit, transient_hash},
-    proofs::{ir::Instruction, IrSource, Proof},
+    hash::persistent_hash,
+    proofs::{ir::Instruction, IrSource},
     repr::FieldRepr,
 };
 use midnight_onchain_runtime::{
@@ -20,8 +20,6 @@ use midnight_onchain_runtime::{
     },
     storage::storage::{Array, Map},
 };
-use rand::Rng as _;
-use rand_chacha::ChaCha20Rng;
 use std::{collections::HashSet, sync::Arc};
 
 /*
@@ -62,11 +60,6 @@ pub const INDEX_PLAYER2_PK: u64 = 4;
 
 pub const INDEX_PLAYER1_COMMITMENT: u64 = 5;
 pub const INDEX_PLAYER2_COMMITMENT: u64 = 6;
-
-// the secrets for authentication
-// this means the players are fixed for this particular example.
-pub const PLAYER1_SK: [u8; 32] = [2u8; 32];
-pub const PLAYER2_SK: [u8; 32] = [3u8; 32];
 
 // not needed for local evaluation
 pub fn dummy_contract_address() -> Address {
@@ -117,20 +110,26 @@ pub fn initial_query_context() -> QueryContext {
     }
 }
 
-pub fn initial_state() -> midnight_onchain_runtime::context::QueryResults<ResultModeGather> {
+pub fn initial_state(
+    pk1: Fr,
+    pk2: Fr,
+) -> midnight_onchain_runtime::context::QueryResults<ResultModeGather> {
     let query_context = initial_query_context();
 
-    let player1 = {
-        let mut address_repr = vec![];
-        AlignedValue::from(PLAYER1_SK).value_only_field_repr(&mut address_repr);
-        AlignedValue::from(transient_hash(&address_repr))
-    };
+    // let player1 = {
+    //     let mut address_repr = vec![];
+    //     AlignedValue::from(PLAYER1_SK).value_only_field_repr(&mut address_repr);
+    //     AlignedValue::from(transient_hash(&address_repr))
+    // };
 
-    let player2 = {
-        let mut address_repr = vec![];
-        AlignedValue::from(PLAYER2_SK).value_only_field_repr(&mut address_repr);
-        AlignedValue::from(transient_hash(&address_repr))
-    };
+    let player1 = AlignedValue::from(pk1);
+    let player2 = AlignedValue::from(pk2);
+
+    // let player2 = {
+    //     let mut address_repr = vec![];
+    //     AlignedValue::from(PLAYER2_SK).value_only_field_repr(&mut address_repr);
+    //     AlignedValue::from(transient_hash(&address_repr))
+    // };
 
     let victories_player1: AlignedValue = Fr::from(0u64).into();
     let victories_player2: AlignedValue = Fr::from(0u64).into();
@@ -624,98 +623,9 @@ fn build_ir_for_open_commitments(
 //     }
 // }
 
-/// Play a single round.
-/// This means:
-///   1. Each player commits
-///   2. Both commits are opened
-///
-/// This takes and return the state so that multiple rounds can be chained.
-pub async fn play_round(
-    rng: &mut ChaCha20Rng,
-    current_state: StateValue,
-    commit_ir: (IrSource, ProofParams),
-    open_ir: (IrSource, ProofParams),
-    value1: Fr,
-    value2: Fr,
-    // could be computed from the values, but left as a variable since it's
-    // useful to test the failing case.
-    winner: Fr,
-) -> (StateValue, [Proof; 3]) {
-    let opening1: Fr = rng.gen();
-
-    let commitment: AlignedValue = transient_commit(&value1, opening1).into();
-    let (transcript, query_result) =
-        run_add_commitment(INDEX_PLAYER1_PK, current_state, commitment.clone());
-
-    let (inputs, public_transcript_inputs, public_transcript_outputs, private_transcript) =
-        add_commitment_encode_params(
-            PLAYER1_SK,
-            transcript,
-            INDEX_PLAYER1_PK,
-            commitment,
-            (value1, opening1),
-        );
-
-    let proof1 = gen_proof_and_check(
-        commit_ir.0.clone(),
-        inputs,
-        private_transcript,
-        public_transcript_inputs,
-        public_transcript_outputs,
-        commit_ir.1.clone(),
-    )
-    .await;
-
-    let opening2: Fr = rng.gen();
-
-    let commitment: AlignedValue = transient_commit(&value2, opening2).into();
-    let (transcript, query_result) = run_add_commitment(
-        INDEX_PLAYER2_PK,
-        query_result.context.state,
-        commitment.clone(),
-    );
-
-    let (inputs, public_transcript_inputs, public_transcript_outputs, private_transcript) =
-        add_commitment_encode_params(
-            PLAYER2_SK,
-            transcript,
-            INDEX_PLAYER2_PK,
-            commitment,
-            (value2, opening2),
-        );
-
-    let proof2 = gen_proof_and_check(
-        commit_ir.0,
-        inputs,
-        private_transcript,
-        public_transcript_inputs,
-        public_transcript_outputs,
-        commit_ir.1.clone(),
-    )
-    .await;
-
-    let (transcript, query_result) =
-        run_open_commitments_program(query_result.context.state, winner);
-
-    let (inputs, public_transcript_inputs, public_transcript_outputs, private_transcript) =
-        open_commitments_encode_params(transcript, (value1, opening1), (value2, opening2), winner);
-
-    let proof3 = gen_proof_and_check(
-        open_ir.0,
-        inputs,
-        private_transcript,
-        public_transcript_inputs,
-        public_transcript_outputs,
-        open_ir.1.clone(),
-    )
-    .await;
-
-    (query_result.context.state, [proof1, proof2, proof3])
-}
-
 // encodes the inputs and private params
 pub fn add_commitment_encode_params(
-    address: [u8; 32],
+    sk: [u8; 32],
     program: Vec<Op<ResultModeVerify>>,
     pk_index: u64,
     commitment: AlignedValue,
@@ -735,7 +645,7 @@ pub fn add_commitment_encode_params(
 
     let mut private_transcript: Vec<Fr> = vec![];
 
-    AlignedValue::from(address).value_only_field_repr(&mut private_transcript);
+    AlignedValue::from(sk).value_only_field_repr(&mut private_transcript);
     private_transcript.push(opening.0);
     private_transcript.push(opening.1);
 
@@ -851,8 +761,11 @@ pub fn run_open_commitments_program(
 
 #[cfg(test)]
 mod tests {
-    use common::keygen;
-    use midnight_base_crypto::proofs::{KeyLocation, ProofPreimage, ProverKey, VerifierKey};
+    use common::{gen_proof_and_check, keygen, read_kzg_params, ProofParams};
+    use midnight_base_crypto::{
+        hash::{transient_commit, transient_hash},
+        proofs::{KeyLocation, Proof, ProofPreimage, ProverKey, VerifierKey},
+    };
     use midnight_ledger::{
         coin_structure::coin::NATIVE_TOKEN,
         construct::ContractCallPrototype,
@@ -862,10 +775,126 @@ mod tests {
     };
     use midnight_onchain_runtime::transcript::Transcript;
     use midnight_zswap::{local::Seed, AuthorizedMint};
-    use rand::{rngs::OsRng, SeedableRng as _};
+    use rand::{rngs::OsRng, Rng as _, SeedableRng as _};
+    use rand_chacha::ChaCha20Rng;
     use std::{borrow::Cow, io::Cursor};
 
+    // the secrets for authentication
+    // this means the players are fixed for this particular example.
+    pub const PLAYER1_SK: [u8; 32] = [2u8; 32];
+    pub const PLAYER2_SK: [u8; 32] = [3u8; 32];
+
     use super::*;
+
+    fn init_state() -> QueryResults<ResultModeGather> {
+        let player1 = {
+            let mut address_repr = vec![];
+            AlignedValue::from(PLAYER1_SK).value_only_field_repr(&mut address_repr);
+            transient_hash(&address_repr)
+        };
+
+        let player2 = {
+            let mut address_repr = vec![];
+            AlignedValue::from(PLAYER2_SK).value_only_field_repr(&mut address_repr);
+            transient_hash(&address_repr)
+        };
+
+        initial_state(player1, player2)
+    }
+
+    /// Play a single round.
+    /// This means:
+    ///   1. Each player commits
+    ///   2. Both commits are opened
+    ///
+    /// This takes and return the state so that multiple rounds can be chained.
+    pub async fn play_round(
+        rng: &mut ChaCha20Rng,
+        current_state: StateValue,
+        commit_ir: (IrSource, ProofParams),
+        open_ir: (IrSource, ProofParams),
+        value1: Fr,
+        value2: Fr,
+        // could be computed from the values, but left as a variable since it's
+        // useful to test the failing case.
+        winner: Fr,
+    ) -> (StateValue, [Proof; 3]) {
+        let opening1: Fr = rng.gen();
+
+        let commitment: AlignedValue = transient_commit(&value1, opening1).into();
+        let (transcript, query_result) =
+            run_add_commitment(INDEX_PLAYER1_PK, current_state, commitment.clone());
+
+        let (inputs, public_transcript_inputs, public_transcript_outputs, private_transcript) =
+            add_commitment_encode_params(
+                PLAYER1_SK,
+                transcript,
+                INDEX_PLAYER1_PK,
+                commitment,
+                (value1, opening1),
+            );
+
+        let proof1 = gen_proof_and_check(
+            commit_ir.0.clone(),
+            inputs,
+            private_transcript,
+            public_transcript_inputs,
+            public_transcript_outputs,
+            commit_ir.1.clone(),
+        )
+        .await;
+
+        let opening2: Fr = rng.gen();
+
+        let commitment: AlignedValue = transient_commit(&value2, opening2).into();
+        let (transcript, query_result) = run_add_commitment(
+            INDEX_PLAYER2_PK,
+            query_result.context.state,
+            commitment.clone(),
+        );
+
+        let (inputs, public_transcript_inputs, public_transcript_outputs, private_transcript) =
+            add_commitment_encode_params(
+                PLAYER2_SK,
+                transcript,
+                INDEX_PLAYER2_PK,
+                commitment,
+                (value2, opening2),
+            );
+
+        let proof2 = gen_proof_and_check(
+            commit_ir.0,
+            inputs,
+            private_transcript,
+            public_transcript_inputs,
+            public_transcript_outputs,
+            commit_ir.1.clone(),
+        )
+        .await;
+
+        let (transcript, query_result) =
+            run_open_commitments_program(query_result.context.state, winner);
+
+        let (inputs, public_transcript_inputs, public_transcript_outputs, private_transcript) =
+            open_commitments_encode_params(
+                transcript,
+                (value1, opening1),
+                (value2, opening2),
+                winner,
+            );
+
+        let proof3 = gen_proof_and_check(
+            open_ir.0,
+            inputs,
+            private_transcript,
+            public_transcript_inputs,
+            public_transcript_outputs,
+            open_ir.1.clone(),
+        )
+        .await;
+
+        (query_result.context.state, [proof1, proof2, proof3])
+    }
 
     #[tokio::test]
     async fn local_execution() {
@@ -875,7 +904,7 @@ mod tests {
         let open_ir = make_openings_circuit();
         let open_proof_params = keygen(&open_ir).await;
 
-        let state = initial_state().context.state;
+        let state = init_state();
 
         // use a seed just to make debugging easier (consistent state between runs).
         let mut rng = ChaCha20Rng::from_seed([41; 32]);
@@ -888,7 +917,7 @@ mod tests {
 
         let (state, _) = play_round(
             &mut rng,
-            state,
+            state.context.state,
             (commit_ir.clone(), commit_proof_params.clone()),
             (open_ir.clone(), open_proof_params.clone()),
             value1,
@@ -1023,7 +1052,7 @@ mod tests {
         let opening = OsRng.gen();
         let commitment: AlignedValue = transient_commit(&value_fr, opening).into();
 
-        let state = initial_state();
+        let state = init_state();
 
         let (transcript, query_result) =
             run_add_commitment(index, state.context.state, commitment.clone());
@@ -1126,7 +1155,7 @@ mod tests {
             Transaction::new(guaranted_coins, fallible_coins, Some(cc));
 
         let balanced_tx = balanced_tx
-            .prove(OsRng, &commit_proof_params.pp, |loc| match &*loc.0 {
+            .prove(OsRng, &read_kzg_params(), |loc| match &*loc.0 {
                 "midnight/zswap/spend" => Some(spend.clone()),
                 "midnight/zswap/output" => Some(output.clone()),
                 "midnight/zswap/sign" => Some(sign.clone()),

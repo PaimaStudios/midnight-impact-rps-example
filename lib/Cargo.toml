@@ -19,4 +19,4 @@ midnight-zswap = { workspace = true }
 hex = "0.4.3"
 
 [dev-dependencies]
-tokio = { version = "1.41.0", features = ["rt", "macros"] }
+tokio = { version = "1.41.0", features = ["rt", "macros", "rt-multi-thread"] }

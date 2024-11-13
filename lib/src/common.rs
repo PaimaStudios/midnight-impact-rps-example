@@ -183,14 +183,20 @@ pub async fn gen_proof_and_check(
 }
 
 pub async fn keygen(ir: &IrSource) -> ProofParams {
-    let pp = concat!(env!("MIDNIGHT_LEDGER_STATIC_DIR"), "/kzg");
+    let pp = read_kzg_params();
 
-    let pp = ParamsProver::read(BufReader::new(File::open(pp).expect(
-        "kzg params not found, run: cargo run --bin make_params to generate new ones",
-    )))
-    .unwrap();
+    let pp = pp.downsize(ir.model(None).k());
 
     let (pk, vk) = ir.keygen(&pp).await.unwrap();
 
     ProofParams { pp, pk, vk }
+}
+
+pub fn read_kzg_params() -> ParamsProver {
+    let pp = concat!(env!("MIDNIGHT_LEDGER_STATIC_DIR"), "/kzg");
+
+    ParamsProver::read(BufReader::new(File::open(pp).expect(
+        "kzg params not found, run: cargo run --bin make_params to generate new ones",
+    )))
+    .unwrap()
 }
