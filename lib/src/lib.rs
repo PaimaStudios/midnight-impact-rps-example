@@ -861,7 +861,7 @@ mod tests {
         zswap::{Offer, Output},
     };
     use midnight_onchain_runtime::transcript::Transcript;
-    use midnight_zswap::AuthorizedMint;
+    use midnight_zswap::{local::Seed, AuthorizedMint};
     use rand::{rngs::OsRng, SeedableRng as _};
     use std::{borrow::Cow, io::Cursor};
 
@@ -1007,8 +1007,8 @@ mod tests {
         (pk, vk, ir)
     }
 
-    #[tokio::test]
-    pub async fn test_tx_creation() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    pub async fn test_tx_io_example() {
         let commit_ir = make_add_commitments_circuit();
         let commit_proof_params = keygen(&commit_ir).await;
         assert!(!commit_ir.do_communications_commitment);
@@ -1016,8 +1016,6 @@ mod tests {
         let spend = decode_zswap_proof_params(SPEND_PK_RAW, SPEND_VK_RAW, SPEND_IR_RAW);
         let output = decode_zswap_proof_params(OUTPUT_PK_RAW, OUTPUT_VK_RAW, OUTPUT_IR_RAW);
         let sign = decode_zswap_proof_params(SIGN_PK_RAW, SIGN_VK_RAW, SIGN_IR_RAW);
-
-        let start = std::time::Instant::now();
 
         let (sk, index) = (PLAYER1_SK, INDEX_PLAYER1_PK);
 
@@ -1038,14 +1036,6 @@ mod tests {
                 commitment,
                 (value_fr, opening),
             );
-
-        let guaranted_coins = Offer {
-            inputs: vec![],
-            outputs: vec![],
-            transient: vec![],
-            deltas: vec![],
-        };
-        let fallible_coins = None;
 
         let cc = ContractCalls::new(&mut OsRng);
 
@@ -1076,49 +1066,38 @@ mod tests {
             key_location: KeyLocation(Cow::Borrowed("builtin")),
         });
 
-        let unproven_tx: Transaction<ProofPreimage> =
-            Transaction::new(guaranted_coins, fallible_coins, Some(cc.clone()));
-
         let call_resolver = (
             commit_proof_params.pk.clone(),
             commit_proof_params.vk.clone(),
             commit_ir.clone(),
         );
 
-        let unbalanced_tx = unproven_tx
-            .prove(OsRng, &commit_proof_params.pp, |loc| match &*loc.0 {
-                "midnight/zswap/spend" => Some(spend.clone()),
-                "midnight/zswap/output" => Some(output.clone()),
-                "midnight/zswap/sign" => Some(sign.clone()),
-                _ => Some(call_resolver.clone()),
-            })
-            .await
-            .unwrap();
+        let fees = 66821;
 
-        let fees = unbalanced_tx.fees(&DUMMY_PARAMETERS).unwrap();
+        let seed = Seed::random(&mut OsRng);
+        let sk = seed.derive_coin_secret_key();
+        let zswap_state = midnight_zswap::local::State::from_seed(&seed);
 
-        println!("Took: {}", start.elapsed().as_millis());
-
-        let zswap_state = midnight_zswap::local::State::new(&mut OsRng);
+        let unspent_output_value = 100000;
 
         let nonce = OsRng.gen();
         let mint_info = coin_structure::coin::Info {
             nonce,
             type_: NATIVE_TOKEN,
-            value: 10000,
+            value: unspent_output_value,
         };
-        let secret_key = coin_structure::coin::SecretKey(persistent_hash(&[1, 2, 3, 4, 5]));
-        let zswap_state = zswap_state.apply_mint(
-            &AuthorizedMint::<ProofPreimage>::new(&mut OsRng, mint_info, &secret_key).unwrap(),
-        );
 
-        let (_state, input) = zswap_state
+        // with real data this should be populated from the transaction history I guess
+        let zswap_state = zswap_state
+            .apply_mint(&AuthorizedMint::<ProofPreimage>::new(&mut OsRng, mint_info, &sk).unwrap());
+
+        let (_zswap_state, input) = zswap_state
             .spend(
                 &mut OsRng,
                 &coin_structure::coin::QualifiedInfo {
                     nonce,
                     type_: NATIVE_TOKEN,
-                    value: 10000,
+                    value: unspent_output_value,
                     mt_index: 0,
                 },
             )
@@ -1131,9 +1110,9 @@ mod tests {
                 &coin_structure::coin::Info {
                     nonce: OsRng.gen(),
                     type_: NATIVE_TOKEN,
-                    value: fees,
+                    value: unspent_output_value - fees,
                 },
-                &secret_key.public_key(),
+                &sk.public_key(),
                 None,
             )
             .unwrap()],
@@ -1147,7 +1126,7 @@ mod tests {
             Transaction::new(guaranted_coins, fallible_coins, Some(cc));
 
         let balanced_tx = balanced_tx
-            .prove(OsRng, &commit_proof_params.pp, |loc| match dbg!(&*loc.0) {
+            .prove(OsRng, &commit_proof_params.pp, |loc| match &*loc.0 {
                 "midnight/zswap/spend" => Some(spend.clone()),
                 "midnight/zswap/output" => Some(output.clone()),
                 "midnight/zswap/sign" => Some(sign.clone()),
@@ -1156,6 +1135,8 @@ mod tests {
             .await
             .unwrap();
 
-        dbg!(balanced_tx.imbalances(true, Some(fees)));
+        let final_fee = balanced_tx.fees(&DUMMY_PARAMETERS).unwrap();
+
+        assert!(fees >= final_fee);
     }
 }
