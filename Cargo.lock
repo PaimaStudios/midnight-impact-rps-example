@@ -1290,7 +1290,7 @@ dependencies = [
 
 [[package]]
 name = "midnight-ledger"
-version = "3.0.3"
+version = "3.0.4"
 dependencies = [
  "futures",
  "is_sorted",
@@ -1325,8 +1325,8 @@ dependencies = [
 
 [[package]]
 name = "midnight-serialize"
-version = "0.3.0"
-source = "git+https://github.com/input-output-hk/midnight-foundations?tag=serialize-0.3#46424a5790782602065658187371903720c8862e"
+version = "0.3.1"
+source = "git+https://github.com/input-output-hk/midnight-foundations?tag=serialize-0.3#6d7d7486cd9a15ff4348e37fa5ef02385808222c"
 dependencies = [
  "borsh",
  "crypto",
@@ -1338,7 +1338,7 @@ dependencies = [
 [[package]]
 name = "midnight-serialize-macros"
 version = "0.1.0"
-source = "git+https://github.com/input-output-hk/midnight-foundations?tag=serialize-0.3#46424a5790782602065658187371903720c8862e"
+source = "git+https://github.com/input-output-hk/midnight-foundations?tag=serialize-0.3#6d7d7486cd9a15ff4348e37fa5ef02385808222c"
 dependencies = [
  "proc-macro2",
  "quote 1.0.37",
@@ -2394,6 +2394,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "console_error_panic_hook",
+ "hex",
  "midnight-base-crypto",
  "midnight-impact-rps-example",
  "midnight-ledger",

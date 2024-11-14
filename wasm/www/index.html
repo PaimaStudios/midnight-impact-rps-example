@@ -3,10 +3,39 @@
 
 <head>
   <meta content="text/html;charset=utf-8" http-equiv="Content-Type" />
+  <link rel="stylesheet" href="style.css">
   <script type="module" src="index.js"></script>
 </head>
 
 <body>
+  <div class="grid-wrapper">
+    <label id="status"></label>
+    <label id="counters"></label>
+
+    <select id="rps-select1">
+      <option value="0">Rock</option>
+      <option value="1">Paper</option>
+      <option value="2">Scissors</option>
+    </select>
+
+    <button id="commit1" disabled>Prove</button>
+    <textarea id="tx1"></textarea>
+
+    <select id="rps-select2">
+      <option value="2">Scissors</option>
+      <option value="0">Rock</option>
+      <option value="1">Paper</option>
+    </select>
+
+    <button id="commit2" disabled>Prove</button>
+
+    <textarea id="tx2"></textarea>
+
+    <label for="open"></label>
+    <button id="open" disabled>Open commitments</button>
+    <textarea id="tx3"></textarea>
+
+  </div>
 </body>
 
 </html>

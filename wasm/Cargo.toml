@@ -21,6 +21,7 @@ midnight-base-crypto = { workspace = true }
 midnight-ledger = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
+hex = { workspace = true }
 
 # The `console_error_panic_hook` crate provides better debugging of panics by
 # logging them with `console.error`. This is great for development, but requires

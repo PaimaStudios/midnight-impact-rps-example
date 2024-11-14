@@ -9,11 +9,10 @@ use midnight_base_crypto::{
     serialize::{deserialize, serialize, NetworkId},
 };
 use midnight_impact_rps_example::{
-    add_commitment_encode_params,
-    common::{gen_proof_and_check, ProofParams},
-    dummy_contract_address, initial_state, make_add_commitments_circuit, make_openings_circuit,
-    open_commitments_encode_params, run_open_commitments_program, INDEX_PLAYER1_PK,
-    INDEX_PLAYER1_VICTORIES, INDEX_PLAYER2_PK, INDEX_TIES,
+    add_commitment_encode_params, common::ProofParams, dummy_contract_address, initial_state,
+    make_add_commitments_circuit, make_openings_circuit, open_commitments_encode_params,
+    run_open_commitments_program, INDEX_PLAYER1_PK, INDEX_PLAYER1_VICTORIES, INDEX_PLAYER2_PK,
+    INDEX_TIES,
 };
 use midnight_impact_rps_example::{run_add_commitment, INDEX_PLAYER2_VICTORIES};
 use midnight_ledger::{
@@ -163,12 +162,19 @@ impl Rng {
     pub fn random_fr(&mut self) -> FrValue {
         FrValue(self.0.gen())
     }
+
+    pub fn random_sk(&mut self) -> PlayerSk {
+        PlayerSk(self.0.gen())
+    }
 }
+
+#[wasm_bindgen]
+pub struct RpsInputCommitment {}
 
 #[wasm_bindgen]
 pub struct FrValue(Fr);
 
-// proof tx type
+// proof server tx type
 type TransactionProvePayload = (
     Transaction<ProofPreimage>,
     // Hack to allow the payload to be the concatenation of two 'serialize' forms.
@@ -191,12 +197,17 @@ pub struct PlayerSk([u8; 32]);
 
 #[wasm_bindgen]
 impl PlayerSk {
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+
     pub fn to_public(&self) -> PlayerPk {
         let hashed = {
             let mut address_repr = vec![];
             AlignedValue::from(self.0).value_only_field_repr(&mut address_repr);
             transient_hash(&address_repr)
         };
+        log(&format!("public key: {:?}", hashed));
 
         PlayerPk(hashed)
     }
@@ -233,6 +244,7 @@ impl Context {
 
     pub async fn commit_to_value(
         &mut self,
+        rng: &mut Rng,
         player: Player,
         sk: &PlayerSk,
         value: RpsInput,
@@ -268,7 +280,7 @@ impl Context {
         };
         let fallible_coins = None;
 
-        let cc = ContractCalls::new(&mut OsRng);
+        let cc = ContractCalls::new(&mut rng.0);
 
         let inputs_aligned = inputs
             .iter()
@@ -341,14 +353,17 @@ impl Context {
         Ok(Uint8Array::from(&res[..]))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn open(
         &mut self,
+        rng: &mut Rng,
         winner: Winner,
         opening1_value: RpsInput,
         opening1_random: &FrValue,
         opening2_value: RpsInput,
         opening2_random: &FrValue,
-    ) -> Vec<u8> {
+        generate_proof: bool,
+    ) -> Result<Uint8Array, JsError> {
         let winner = match winner {
             Winner::P1 => Fr::from(INDEX_PLAYER1_VICTORIES),
             Winner::P2 => Fr::from(INDEX_PLAYER2_VICTORIES),
@@ -361,29 +376,95 @@ impl Context {
         let (transcript, query_result) =
             run_open_commitments_program(self.current_state.clone(), winner);
 
-        let (inputs, public_transcript_inputs, public_transcript_outputs, private_transcript) =
+        let (inputs, _public_transcript_inputs, _public_transcript_outputs, private_transcript) =
             open_commitments_encode_params(
-                transcript,
+                transcript.clone(),
                 (opening1_value, opening1_random.0),
                 (opening2_value, opening2_random.0),
                 winner,
             );
 
-        let proof = gen_proof_and_check(
-            self.open_ir.0.clone(),
-            inputs,
-            private_transcript,
-            public_transcript_inputs,
-            public_transcript_outputs,
-            self.open_ir.1.clone(),
-        )
-        .await;
-
         self.current_state = query_result.context.state;
 
-        let mut buf = vec![];
-        serialize(&proof, &mut buf, NetworkId::Undeployed).unwrap();
-        buf
+        let guaranted_coins = Offer {
+            inputs: vec![],
+            outputs: vec![],
+            transient: vec![],
+            deltas: vec![],
+        };
+        let fallible_coins = None;
+
+        let cc = ContractCalls::new(&mut rng.0);
+
+        let inputs_aligned = inputs
+            .iter()
+            .map(|fr| AlignedValue::from(*fr))
+            .collect::<Vec<_>>();
+        let input = AlignedValue::concat(&inputs_aligned);
+
+        let cc = cc.add_call(ContractCallPrototype {
+            address: dummy_contract_address(),
+            entry_point: state::EntryPointBuf("open_commitments".to_string().into_bytes()),
+            op: ContractOperation::new(None),
+            guaranteed_public_transcript: Some(Transcript {
+                gas: query_result.gas_cost,
+                effects: query_result.context.effects,
+                program: transcript,
+            }),
+            fallible_public_transcript: None,
+            private_transcript_outputs: private_transcript
+                .iter()
+                .map(|fr| AlignedValue::from(*fr))
+                .collect(),
+            input,
+            output: AlignedValue::from(vec![]),
+            communication_commitment_rand: OsRng.gen(),
+            key_location: KeyLocation(Cow::Borrowed("open_commitments")),
+        });
+
+        let unproven_tx: Transaction<ProofPreimage> =
+            Transaction::new(guaranted_coins, fallible_coins, Some(cc));
+
+        let call_resolver = (
+            self.open_ir.1.pk.clone(),
+            self.open_ir.1.vk.clone(),
+            self.open_ir.0.clone(),
+        );
+
+        if !generate_proof {
+            let mut res = Vec::new();
+
+            let resolvers = vec![("open_commitments".to_string(), call_resolver.clone())]
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
+
+            let tx_proof_payload: TransactionProvePayload = (unproven_tx, 1u8, resolvers);
+
+            serialize(&tx_proof_payload, &mut res, NetworkId::Undeployed)?;
+
+            return Ok(Uint8Array::from(&res[..]));
+        }
+
+        let unbalanced_tx = unproven_tx
+            .prove(OsRng, &self.commit_ir.1.pp, |loc| match &*loc.0 {
+                "midnight/zswap/spend" => Some(self.spend.clone()),
+                "midnight/zswap/output" => Some(self.output.clone()),
+                "midnight/zswap/sign" => Some(self.sign.clone()),
+                _ => Some(call_resolver.clone()),
+            })
+            .await;
+
+        let unbalanced_tx = match unbalanced_tx {
+            Ok(unbalanced_tx) => unbalanced_tx,
+            Err(error) => {
+                log(&format!("{:?}", &error));
+                return Err(error.into());
+            }
+        };
+
+        let mut res = Vec::new();
+        serialize(&unbalanced_tx, &mut res, NetworkId::Undeployed)?;
+        Ok(Uint8Array::from(&res[..]))
     }
 
     pub fn get_state(&self) -> Vec<u64> {

@@ -19,6 +19,7 @@ midnight-swap = { git = "https://github.com/input-output-hk/midnight-ledger-prot
 rand = { version = "^0.8.4", features = ["getrandom"] }
 rand_chacha = "^0.3.1"
 tokio = { version = "1.41.0", features = ["rt", "macros"] }
+hex = "0.4.3"
 
 [patch.'https://github.com/input-output-hk/midnight-ledger-prototype']
 midnight-ledger = { path = "../midnight-ledger-prototype/ledger" }

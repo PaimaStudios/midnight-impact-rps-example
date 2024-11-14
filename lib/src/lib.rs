@@ -1036,7 +1036,7 @@ mod tests {
         (pk, vk, ir)
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    #[tokio::test(flavor = "multi_thread")]
     pub async fn test_tx_io_example() {
         let commit_ir = make_add_commitments_circuit();
         let commit_proof_params = keygen(&commit_ir).await;
@@ -1152,10 +1152,14 @@ mod tests {
         let fallible_coins = None;
 
         let balanced_tx: Transaction<ProofPreimage> =
-            Transaction::new(guaranted_coins, fallible_coins, Some(cc));
+            Transaction::new(guaranted_coins, fallible_coins, Some(cc.clone()));
+
+        let pp = read_kzg_params();
+
+        let start = std::time::Instant::now();
 
         let balanced_tx = balanced_tx
-            .prove(OsRng, &read_kzg_params(), |loc| match &*loc.0 {
+            .prove(OsRng, &pp, |loc| match &*loc.0 {
                 "midnight/zswap/spend" => Some(spend.clone()),
                 "midnight/zswap/output" => Some(output.clone()),
                 "midnight/zswap/sign" => Some(sign.clone()),
@@ -1164,8 +1168,35 @@ mod tests {
             .await
             .unwrap();
 
+        dbg!(start.elapsed().as_millis());
+
         let final_fee = balanced_tx.fees(&DUMMY_PARAMETERS).unwrap();
 
         assert!(fees >= final_fee);
+
+        let without_funds: Transaction<ProofPreimage> = Transaction::new(
+            Offer {
+                inputs: vec![],
+                outputs: vec![],
+                transient: vec![],
+                deltas: vec![],
+            },
+            None,
+            Some(cc),
+        );
+
+        let start = std::time::Instant::now();
+
+        let _balanced_tx = without_funds
+            .prove(OsRng, &pp, |loc| match &*loc.0 {
+                "midnight/zswap/spend" => Some(spend.clone()),
+                "midnight/zswap/output" => Some(output.clone()),
+                "midnight/zswap/sign" => Some(sign.clone()),
+                _ => Some(call_resolver.clone()),
+            })
+            .await
+            .unwrap();
+
+        dbg!(start.elapsed().as_millis());
     }
 }
