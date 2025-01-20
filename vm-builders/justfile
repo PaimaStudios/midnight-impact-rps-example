@@ -1,0 +1,21 @@
+make:
+    wasm-pack build --dev --target web -d www/pkg
+
+build_release:
+    RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals' \
+    CARGO_PROFILE_RELEASE_DEBUG=true \
+      rustup run nightly-2024-08-02 \
+      wasm-pack build --release --target web . -d www/pkg \
+      -- -Z build-std=panic_abort,std
+
+make_release:
+    just build_release
+    sed -i "s|\s*const pkg = await import('../../..');|  const pkg = await import('../../../wasm.js');|" www/pkg/snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src/workerHelpers.js
+
+pack:
+    RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals' \
+      rustup run nightly-2024-08-02 \
+      wasm-pack build --release --target web . -d pkg \
+      -- -Z build-std=panic_abort,std
+
+    jq 'del(.type) | .files += ["snippets"]' ./pkg/package.json > ./pkg/tmp.json && mv ./pkg/tmp.json ./pkg/package.json

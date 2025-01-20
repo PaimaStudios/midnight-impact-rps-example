@@ -1,4 +1,4 @@
-use midnight_base_crypto::{
+use coin_structure::transient_crypto::{
     curve::Fr,
     proofs::{
         ir::Instruction, IrSource, KeyLocation, ParamsProver, Proof, ProofPreimage, ProverKey,

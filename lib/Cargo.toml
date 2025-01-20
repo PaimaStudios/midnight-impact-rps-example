@@ -4,11 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# midnight-onchain-runtime = { git = "https://github.com/input-output-hk/compactc" }
-# midnight-base-crypto = { git = "https://github.com/input-output-hk/midnight-foundations", tag = "base-crypto-0.4", package = "midnight-base-crypto", default-features = false }
-# rand = { version = "^0.8.4", features = ["getrandom"] }
-# rand_chacha = "^0.3.1"
-
 midnight-onchain-runtime = { workspace = true }
 midnight-base-crypto = { workspace = true }
 rand = { workspace = true }

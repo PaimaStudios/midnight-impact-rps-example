@@ -1,8 +1,8 @@
 [package]
-name = "wasm"
+name = "midnight-vm-builders"
 version = "0.1.0"
 authors = ["Enzo Cioppettini <48031343+ecioppettini@users.noreply.github.com>"]
-edition = "2018"
+edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -19,6 +19,7 @@ midnight-impact-rps-example = { path = "../lib" }
 midnight-onchain-runtime = { workspace = true }
 midnight-base-crypto = { workspace = true }
 midnight-ledger = { workspace = true }
+midnight-transient-crypto = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 hex = { workspace = true }
@@ -42,11 +43,3 @@ tower-http = { version = "0.6.1", features = ["fs", "trace"] }
 midnight-impact-rps-example = { path = "../lib" }
 tokio = { workspace = true }
 midnight-base-crypto = { workspace = true }
-
-[profile.release]
-# Tell `rustc` to optimize for small code size.
-# opt-level = "s"
-
-
-# [profile.dev.build-override]
-# opt-level = 3

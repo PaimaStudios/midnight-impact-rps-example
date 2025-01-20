@@ -1,13 +1,13 @@
 pub mod common;
 
-use common::{gen_transcript_constraints, get_transcript};
-use midnight_base_crypto::{
+use coin_structure::transient_crypto::{
     curve::Fr,
-    fab::AlignedValue,
-    hash::persistent_hash,
+    fab::AlignedValueExt as _,
     proofs::{ir::Instruction, IrSource},
-    repr::FieldRepr,
+    repr::FieldRepr as _,
 };
+use common::{gen_transcript_constraints, get_transcript};
+use midnight_base_crypto::{fab::AlignedValue, hash::persistent_hash};
 use midnight_onchain_runtime::{
     coin_structure::contract::Address,
     context::{BlockContext, Effects, QueryContext, QueryResults},
@@ -61,6 +61,9 @@ pub const INDEX_PLAYER2_PK: u64 = 4;
 pub const INDEX_PLAYER1_COMMITMENT: u64 = 5;
 pub const INDEX_PLAYER2_COMMITMENT: u64 = 6;
 
+pub const COMMIT_ENTRY_POINT: &str = "commit_to_value";
+pub const OPEN_ENTRY_POINT: &str = "open_commitments";
+
 // not needed for local evaluation
 pub fn dummy_contract_address() -> Address {
     Address(persistent_hash(&[1, 2, 3]))
@@ -76,7 +79,12 @@ pub fn initial_query_context() -> QueryContext {
     // not used for anything in this example, but would need to be set to build a tx
     // technically we would need two of these, one for each circuit
     contract_state.operations.insert(
-        state::EntryPointBuf("circuit1".to_string().into_bytes()),
+        state::EntryPointBuf(COMMIT_ENTRY_POINT.to_string().into_bytes()),
+        ContractOperation::new(None),
+    );
+
+    contract_state.operations.insert(
+        state::EntryPointBuf(OPEN_ENTRY_POINT.to_string().into_bytes()),
         ContractOperation::new(None),
     );
 
@@ -116,20 +124,8 @@ pub fn initial_state(
 ) -> midnight_onchain_runtime::context::QueryResults<ResultModeGather> {
     let query_context = initial_query_context();
 
-    // let player1 = {
-    //     let mut address_repr = vec![];
-    //     AlignedValue::from(PLAYER1_SK).value_only_field_repr(&mut address_repr);
-    //     AlignedValue::from(transient_hash(&address_repr))
-    // };
-
     let player1 = AlignedValue::from(pk1);
     let player2 = AlignedValue::from(pk2);
-
-    // let player2 = {
-    //     let mut address_repr = vec![];
-    //     AlignedValue::from(PLAYER2_SK).value_only_field_repr(&mut address_repr);
-    //     AlignedValue::from(transient_hash(&address_repr))
-    // };
 
     let victories_player1: AlignedValue = Fr::from(0u64).into();
     let victories_player2: AlignedValue = Fr::from(0u64).into();
@@ -360,9 +356,15 @@ fn build_ir_for_add_commitment(
 
     for op in &program {
         op.field_repr(&mut public_transcript_inputs);
+        dbg!(&op);
+        dbg!(op.field_vec());
     }
 
+    dbg!(&public_transcript_inputs);
+
     let num_inputs = pushed_inputs.len() as u32;
+
+    dbg!(&pushed_inputs);
 
     let (pis, mut i, dedup, output_indexes) = gen_transcript_constraints(program, pushed_inputs);
 
@@ -372,6 +374,8 @@ fn build_ir_for_add_commitment(
         instructions.push(Instruction::PrivateInput { guard: None });
         i += 1;
     }
+
+    dbg!(&instructions);
 
     IrSource {
         num_inputs,
@@ -761,11 +765,14 @@ pub fn run_open_commitments_program(
 
 #[cfg(test)]
 mod tests {
-    use common::{gen_proof_and_check, keygen, read_kzg_params, ProofParams};
-    use midnight_base_crypto::{
-        hash::{transient_commit, transient_hash},
-        proofs::{KeyLocation, Proof, ProofPreimage, ProverKey, VerifierKey},
+    use coin_structure::{
+        serialize::serialized_size,
+        transient_crypto::{
+            hash::{transient_commit, transient_hash},
+            proofs::{KeyLocation, Proof, ProofPreimage, ProverKey, VerifierKey},
+        },
     };
+    use common::{gen_proof_and_check, keygen, read_kzg_params, ProofParams};
     use midnight_ledger::{
         coin_structure::coin::NATIVE_TOKEN,
         construct::ContractCallPrototype,
@@ -774,7 +781,7 @@ mod tests {
         zswap::{Offer, Output},
     };
     use midnight_onchain_runtime::transcript::Transcript;
-    use midnight_zswap::{local::Seed, AuthorizedMint};
+    use midnight_zswap::{keys::Seed, AuthorizedMint};
     use rand::{rngs::OsRng, Rng as _, SeedableRng as _};
     use rand_chacha::ChaCha20Rng;
     use std::{borrow::Cow, io::Cursor};
@@ -844,6 +851,8 @@ mod tests {
         )
         .await;
 
+        dbg!(serialized_size(&proof1));
+
         let opening2: Fr = rng.gen();
 
         let commitment: AlignedValue = transient_commit(&value2, opening2).into();
@@ -882,6 +891,8 @@ mod tests {
                 (value2, opening2),
                 winner,
             );
+
+        dbg!(&public_transcript_inputs);
 
         let proof3 = gen_proof_and_check(
             open_ir.0,
@@ -1105,7 +1116,7 @@ mod tests {
 
         let seed = Seed::random(&mut OsRng);
         let sk = seed.derive_coin_secret_key();
-        let zswap_state = midnight_zswap::local::State::from_seed(&seed);
+        let zswap_state = midnight_zswap::local::State::from_seed(seed);
 
         let unspent_output_value = 100000;
 

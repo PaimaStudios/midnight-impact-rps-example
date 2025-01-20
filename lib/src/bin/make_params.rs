@@ -1,4 +1,4 @@
-use midnight_base_crypto::proofs::ParamsProver;
+use coin_structure::transient_crypto::proofs::ParamsProver;
 use std::{fs::File, io::BufReader};
 
 pub fn main() {
