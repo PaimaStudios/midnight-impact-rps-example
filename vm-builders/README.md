@@ -1,9 +1,9 @@
 # About
 
-This package implements a typescript interface for building Midnight contracts
-with the low level primitives:
+This package implements a TypeScript interface for building Midnight contracts
+with the low-level primitives:
 [Impact](https://docs.midnight.network/develop/how-midnight-works/impact) and
-the zk ir.
+the zk ir, thereby bypassing Compact.
 
 ## Limitations
 
