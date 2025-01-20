@@ -1,4 +1,4 @@
-import init, { initThreadPool, Context, ContractStateBuilder, StateValue, FrValue, AlignedValue, transient_hash, Rng, NetworkId, Ops, ImpactProgram, Alignment, Key, IrSource, ParamsProver, AlignedValues, make_unbalanced_transaction } from 'midnight-vm-builders';
+import init, { initThreadPool, Context, ContractStateBuilder, StateValue, FrValue, AlignedValue, transient_hash, Rng, NetworkId, Ops, ImpactProgram, Alignment, Key, IrSource, ParamsProver, AlignedValues, make_unbalanced_transaction } from 'midnight-vm-bindings';
 
 const STATE_INDEX_A = 0n;
 const STATE_INDEX_B = 1n;

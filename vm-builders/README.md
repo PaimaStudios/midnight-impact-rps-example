@@ -25,7 +25,7 @@ with the extra constraint that `a * b = c`. Both of these are enforced only
 through the zk circuit.
 
 ```ts
-import init, { initThreadPool, Context, ContractStateBuilder, StateValue, FrValue, AlignedValue, transient_hash, Rng, NetworkId, Ops, ImpactProgram, Alignment, Key, IrSource, ParamsProver, AlignedValues, make_unbalanced_transaction } from 'midnight-vm-builders';
+import init, { initThreadPool, Context, ContractStateBuilder, StateValue, FrValue, AlignedValue, transient_hash, Rng, NetworkId, Ops, ImpactProgram, Alignment, Key, IrSource, ParamsProver, AlignedValues, make_unbalanced_transaction } from 'midnight-vm-bindings';
 ```
 
 To start we need to initialize the wasm module, and the webworker-based threadpool for rayon.

@@ -13,6 +13,6 @@
     "webpack-dev-server": "^5.0.4"
   },
   "dependencies": {
-    "midnight-vm-builders": "^0.1.0"
+    "midnight-vm-bindings": "^0.1.0"
   }
 }

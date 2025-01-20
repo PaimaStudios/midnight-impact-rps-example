@@ -1419,7 +1419,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "midnight-vm-builders"
+name = "midnight-vm-bindings"
 version = "0.1.0"
 dependencies = [
  "axum",
