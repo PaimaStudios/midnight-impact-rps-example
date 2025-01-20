@@ -18,4 +18,4 @@ pack:
       wasm-pack build --release --target web . -d pkg \
       -- -Z build-std=panic_abort,std
 
-    jq 'del(.type) | .files += ["snippets"]' ./pkg/package.json > ./pkg/tmp.json && mv ./pkg/tmp.json ./pkg/package.json
+    jq 'del(.type) | .files += ["snippets"] | .name = "@paima/midnight-vm-bindings"' ./pkg/package.json > ./pkg/tmp.json && mv ./pkg/tmp.json ./pkg/package.json
