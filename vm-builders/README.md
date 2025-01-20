@@ -1,7 +1,7 @@
 # About
 
-This package implements a typescript interface to
-build Midnight contracts with the low level primitives:
+This package implements a typescript interface for building Midnight contracts
+with the low level primitives:
 [Impact](https://docs.midnight.network/develop/how-midnight-works/impact) and
 the zk ir.
 
@@ -17,54 +17,55 @@ downsizing until error.
 
 ## Minimal Example
 
-The following is a demo for a simple contract (with no practical utility),
-where the contract state stores 3 numeric variables (a, b, c).
+The following is a demo for a simple contract (with no practical utility), where
+the contract state stores 3 numeric variables: **a**, **b** and **c**.
 
-Then, an authenticated (with knowledge of a private key) user can change these
-values through the contract call, with the constraint that a * b = c;
+Then an authenticated user can change these values through the contract call,
+with the extra constraint that `a * b = c`. Both of these are enforced only
+through the zk circuit.
 
 ```ts
 import init, { initThreadPool, Context, ContractStateBuilder, StateValue, FrValue, AlignedValue, transient_hash, Rng, NetworkId, Ops, ImpactProgram, Alignment, Key, IrSource, ParamsProver, AlignedValues, make_unbalanced_transaction } from 'midnight-vm-builders';
 ```
 
-The first two things we need to do, is to initialize the wasm module, and the
-webworker based thread pool for rayon.
+To start we need to initialize the wasm module, and the webworker-based threadpool for rayon.
 
 ```ts
 await init();
 await initThreadPool(navigator.hardwareConcurrency);
 ```
 
-*NOTE:* For the thread pool to work, it's necessary to set the
-'Cross-Origin-Embedder-Policy' and 'Cross-Origin-Opener-Policy' headders.
+>  **NOTE:** For the thread pool to work, it's necessary to set the
+>  `Cross-Origin-Embedder-Policy` and `Cross-Origin-Opener-Policy` headers.
+>
+>  For example, for the webpack devserver this can be done with:
+>
+>  ```js
+>  // webpack.config.js
+>
+>  module.exports = {
+>    devServer: {
+>      headers: [
+>        {
+>          key: 'Cross-Origin-Embedder-Policy',
+>          value: 'require-corp',
+>        },
+>        {
+>          key: 'Cross-Origin-Opener-Policy',
+>          value: 'same-origin',
+>        },
+>      ]
+>    }
+>  }
+>  ```
 
-For example, for the webpack devserver this can be done with:
-
-```js
-// webpack.config.js
-
-module.exports = {
-  devServer: {
-    headers: [
-      {
-        key: 'Cross-Origin-Embedder-Policy',
-        value: 'require-corp',
-      },
-      {
-        key: 'Cross-Origin-Opener-Policy',
-        value: 'same-origin',
-      },
-    ]
-  }
-}
-```
-
-The next thing that we need to do is setup the initial state, which is setup
+The next thing that we need to do is setup the initial state, which is done
 through the deploy transaction.
 
 ```ts
-// The contract state is an array of values, so we need to use indexes to refer
-// to the state variables.
+/* 
+The contract state is an array of values, so we need to use indexes to refer to the state variables.
+*/
 const STATE_INDEX_A = 0n;
 const STATE_INDEX_B = 1n;
 const STATE_INDEX_C = 2n;
@@ -77,6 +78,7 @@ function initializeContext(admin_sk: AlignedValue): Context {
 
   const csb = ContractStateBuilder.initial_query_context(["op1"], ledger_variables);
 
+  // we set a,b and c to null in the initial state.
   csb.insert_to_state_array(STATE_INDEX_A, StateValue.null());
   csb.insert_to_state_array(STATE_INDEX_B, StateValue.null());
   csb.insert_to_state_array(STATE_INDEX_C, StateValue.null());
@@ -98,7 +100,6 @@ Now we can write the actual Impact program and the associated constraints
 through the ir.
 
 ```ts
-
 function buildProgram(): { zkir: IrSource, program: ImpactProgram } {
   const builder = ImpactProgram.empty("op");
 
