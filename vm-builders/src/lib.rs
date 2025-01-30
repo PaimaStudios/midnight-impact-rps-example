@@ -299,7 +299,7 @@ impl Context {
 
         let cc = ContractCalls::new(&mut rng.0);
 
-        let contract_state = ContractState {
+        let mut contract_state = ContractState {
             data: self.current_state.clone().0,
             ..Default::default()
         };
@@ -307,7 +307,7 @@ impl Context {
         for op in &mut ops.0 {
             let pp = op.proof_params(pp).await;
 
-            contract_state.operations.insert(
+            contract_state.operations = contract_state.operations.insert(
                 midnight_onchain_runtime::state::EntryPointBuf(op.entry_point.clone().into_bytes()),
                 ContractOperation::new(Some(pp.vk.clone())),
             );
@@ -319,7 +319,7 @@ impl Context {
 
         self.contract_address.replace(Address(contract_address));
 
-        cc.add_deploy(deploy);
+        let cc = cc.add_deploy(deploy);
 
         let unproven_tx = Transaction::new(guaranted_coins, fallible_coins, Some(cc));
 
@@ -915,7 +915,7 @@ impl ImpactProgram {
             dedup,
             next_input_id: i,
             output_indexes,
-            do_communications_commitment: false,
+            do_communications_commitment: true,
             instructions,
             num_inputs,
             private_inputs,
@@ -927,7 +927,11 @@ impl ImpactProgram {
     pub fn run(&self, context: &mut Context, mut inputs: Vec<StateValue>) -> QueryResults {
         let query_context = midnight_onchain_runtime::context::QueryContext::new(
             context.current_state.0.clone(),
-            midnight_impact_rps_example::dummy_contract_address(),
+            context
+                .contract_address
+                .clone()
+                .expect("need to make the deploy first")
+                .0,
         );
 
         inputs.reverse();
@@ -1000,6 +1004,13 @@ pub fn transient_hash(value: &FrValue) -> FrValue {
 #[wasm_bindgen]
 #[derive(Clone)]
 pub struct Address(midnight_ledger::coin_structure::contract::Address);
+
+#[wasm_bindgen]
+impl Address {
+    pub fn debug_repr(&self) -> String {
+        format!("{:?}", self.0)
+    }
+}
 
 #[wasm_bindgen]
 pub struct NetworkId(midnight_base_crypto::serialize::NetworkId);
@@ -1089,7 +1100,7 @@ async fn make_unbalanced_transaction_inner(
             .map(|av| av.0.clone())
             .collect(),
         input,
-        output: midnight_base_crypto::fab::AlignedValue::from(vec![]),
+        output: midnight_base_crypto::fab::AlignedValue::concat([]),
         communication_commitment_rand: rng.0.gen(),
         key_location: KeyLocation(Cow::Owned(entry_point)),
     });
@@ -1117,7 +1128,7 @@ async fn make_unbalanced_transaction_inner(
         Transaction::ClaimMint(_) => (),
     }
 
-    let proof_params = ir.proof_params(&pp).await;
+    let proof_params = ir.proof_params(pp).await;
 
     let call_resolver = (
         proof_params.pk.clone(),
