@@ -52,6 +52,127 @@ fn main() -> Result<(), JsValue> {
 }
 
 #[wasm_bindgen]
+pub struct WasmProver {
+    proof_params: ParamsProver,
+    // spend: (
+    //     ProverKey,
+    //     VerifierKey,
+    //     midnight_transient_crypto::proofs::IrSource,
+    // ),
+    // output: (
+    //     ProverKey,
+    //     VerifierKey,
+    //     midnight_transient_crypto::proofs::IrSource,
+    // ),
+    // sign: (
+    //     ProverKey,
+    //     VerifierKey,
+    //     midnight_transient_crypto::proofs::IrSource,
+    // ),
+}
+
+#[wasm_bindgen]
+pub struct ZkConfig(ZkConfigEnum);
+
+enum ZkConfigEnum {
+    Circuit {
+        pk: ProverKey,
+        vk: VerifierKey,
+        ir: midnight_transient_crypto::proofs::IrSource,
+        circuit_id: String,
+    },
+    Empty,
+}
+
+#[wasm_bindgen]
+impl ZkConfig {
+    pub fn empty() -> Self {
+        Self(ZkConfigEnum::Empty)
+    }
+
+    pub fn new(circuit_id: String, pk: &Uint8Array, vk: &Uint8Array, ir: &Uint8Array) -> Self {
+        let pk: ProverKey = midnight_ledger::serialize::deserialize(
+            &pk.to_vec()[..],
+            midnight_ledger::serialize::NetworkId::TestNet,
+        )
+        .unwrap();
+
+        let vk: VerifierKey = midnight_ledger::serialize::deserialize(
+            &vk.to_vec()[..],
+            midnight_ledger::serialize::NetworkId::TestNet,
+        )
+        .unwrap();
+
+        let ir: midnight_transient_crypto::proofs::IrSource =
+            midnight_ledger::serialize::deserialize(
+                &ir.to_vec()[..],
+                midnight_ledger::serialize::NetworkId::TestNet,
+            )
+            .unwrap();
+
+        ZkConfig(ZkConfigEnum::Circuit {
+            pk,
+            vk,
+            ir,
+            circuit_id,
+        })
+    }
+}
+
+#[wasm_bindgen]
+impl WasmProver {
+    pub fn new(pp: &ParamsProver) -> WasmProver {
+        WasmProver {
+            proof_params: pp.clone(),
+        }
+    }
+
+    pub async fn prove_tx(
+        &self,
+        rng: &Rng,
+        unproven_tx: &Uint8Array,
+        network_id: NetworkId,
+        zk_config: &ZkConfig,
+    ) -> Result<Uint8Array, JsError> {
+        let tx: Transaction<ProofPreimage> =
+            midnight_ledger::serialize::deserialize(&unproven_tx.to_vec()[..], network_id.0)
+                .unwrap();
+
+        let call_resolver = match &zk_config.0 {
+            ZkConfigEnum::Circuit {
+                pk,
+                vk,
+                ir,
+                circuit_id,
+            } => Some((pk.clone(), vk.clone(), ir.clone())),
+            ZkConfigEnum::Empty => None,
+        };
+
+        // let resolvers = vec![("commit_to_value".to_string(), call_resolver.clone())]
+        //     .into_iter()
+        //     .collect::<std::collections::HashMap<_, _>>();
+
+        let unbalanced_tx = tx
+            .prove(rng.0.clone(), &self.proof_params.0, |loc| match &*loc.0 {
+                // "midnight/zswap/spend" => Some(self.spend.clone()),
+                // "midnight/zswap/output" => Some(self.output.clone()),
+                // "midnight/zswap/sign" => Some(self.sign.clone()),
+                "midnight/zswap/spend" => todo!(),
+                "midnight/zswap/output" => todo!(),
+                "midnight/zswap/sign" => todo!(),
+                _ => call_resolver.clone(),
+            })
+            .await
+            .unwrap();
+
+        let mut res = Vec::new();
+        midnight_ledger::serialize::serialize(&unbalanced_tx, &mut res, network_id.0)?;
+        Ok(Uint8Array::from(&res[..]))
+    }
+}
+
+#[wasm_bindgen]
+#[derive(Clone)]
 pub struct ParamsProver(midnight_transient_crypto::proofs::ParamsProver);
 
 #[wasm_bindgen]
@@ -64,6 +185,11 @@ impl ParamsProver {
 
     pub fn read(bytes: Vec<u8>) -> Self {
         Self(midnight_transient_crypto::proofs::ParamsProver::read(Cursor::new(bytes)).unwrap())
+    }
+
+    pub fn downsize(&mut self, k: u8) {
+        // TODO: not super optimal to clone this, as it is a big structure.
+        self.0 = self.0.clone().downsize(k);
     }
 }
 
@@ -145,15 +271,8 @@ pub struct Context {
 #[wasm_bindgen]
 impl Context {
     pub fn new(state: StateValue, network_id: NetworkId) -> Self {
-        // let spend = decode_zswap_proof_params(SPEND_PK_RAW, SPEND_VK_RAW, SPEND_IR_RAW);
-        // let output = decode_zswap_proof_params(OUTPUT_PK_RAW, OUTPUT_VK_RAW, OUTPUT_IR_RAW);
-        // let sign = decode_zswap_proof_params(SIGN_PK_RAW, SIGN_VK_RAW, SIGN_IR_RAW);
-
         Context {
             current_state: state,
-            // spend,
-            // output,
-            // sign,
             contract_address: None,
             network_id,
         }
