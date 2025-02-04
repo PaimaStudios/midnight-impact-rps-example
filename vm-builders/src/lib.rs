@@ -54,21 +54,6 @@ fn main() -> Result<(), JsValue> {
 #[wasm_bindgen]
 pub struct WasmProver {
     proof_params: ParamsProver,
-    // spend: (
-    //     ProverKey,
-    //     VerifierKey,
-    //     midnight_transient_crypto::proofs::IrSource,
-    // ),
-    // output: (
-    //     ProverKey,
-    //     VerifierKey,
-    //     midnight_transient_crypto::proofs::IrSource,
-    // ),
-    // sign: (
-    //     ProverKey,
-    //     VerifierKey,
-    //     midnight_transient_crypto::proofs::IrSource,
-    // ),
 }
 
 #[wasm_bindgen]
@@ -90,32 +75,37 @@ impl ZkConfig {
         Self(ZkConfigEnum::Empty)
     }
 
-    pub fn new(circuit_id: String, pk: &Uint8Array, vk: &Uint8Array, ir: &Uint8Array) -> Self {
+    pub fn new(
+        circuit_id: String,
+        pk: &Uint8Array,
+        vk: &Uint8Array,
+        ir: &Uint8Array,
+    ) -> Result<Self, JsError> {
         let pk: ProverKey = midnight_ledger::serialize::deserialize(
             &pk.to_vec()[..],
-            midnight_ledger::serialize::NetworkId::TestNet,
+            midnight_ledger::serialize::NetworkId::Undeployed,
         )
-        .unwrap();
+        .map_err(|e| JsError::new(e.to_string().as_str()))?;
 
         let vk: VerifierKey = midnight_ledger::serialize::deserialize(
             &vk.to_vec()[..],
-            midnight_ledger::serialize::NetworkId::TestNet,
+            midnight_ledger::serialize::NetworkId::Undeployed,
         )
-        .unwrap();
+        .map_err(|e| JsError::new(e.to_string().as_str()))?;
 
         let ir: midnight_transient_crypto::proofs::IrSource =
             midnight_ledger::serialize::deserialize(
                 &ir.to_vec()[..],
-                midnight_ledger::serialize::NetworkId::TestNet,
+                midnight_ledger::serialize::NetworkId::Undeployed,
             )
-            .unwrap();
+            .map_err(|e| JsError::new(e.to_string().as_str()))?;
 
-        ZkConfig(ZkConfigEnum::Circuit {
+        Ok(ZkConfig(ZkConfigEnum::Circuit {
             pk,
             vk,
             ir,
             circuit_id,
-        })
+        }))
     }
 }
 
@@ -136,34 +126,24 @@ impl WasmProver {
     ) -> Result<Uint8Array, JsError> {
         let tx: Transaction<ProofPreimage> =
             midnight_ledger::serialize::deserialize(&unproven_tx.to_vec()[..], network_id.0)
-                .unwrap();
+                .map_err(|e| JsError::new(e.to_string().as_ref()))?;
 
         let call_resolver = match &zk_config.0 {
             ZkConfigEnum::Circuit {
                 pk,
                 vk,
                 ir,
-                circuit_id,
+                circuit_id: _,
             } => Some((pk.clone(), vk.clone(), ir.clone())),
             ZkConfigEnum::Empty => None,
         };
 
-        // let resolvers = vec![("commit_to_value".to_string(), call_resolver.clone())]
-        //     .into_iter()
-        //     .collect::<std::collections::HashMap<_, _>>();
-
         let unbalanced_tx = tx
-            .prove(rng.0.clone(), &self.proof_params.0, |loc| match &*loc.0 {
-                // "midnight/zswap/spend" => Some(self.spend.clone()),
-                // "midnight/zswap/output" => Some(self.output.clone()),
-                // "midnight/zswap/sign" => Some(self.sign.clone()),
-                "midnight/zswap/spend" => todo!(),
-                "midnight/zswap/output" => todo!(),
-                "midnight/zswap/sign" => todo!(),
-                _ => call_resolver.clone(),
+            .prove(rng.0.clone(), &self.proof_params.0, |_loc| {
+                call_resolver.clone()
             })
             .await
-            .unwrap();
+            .map_err(|e| JsError::new(&e.to_string()))?;
 
         let mut res = Vec::new();
         midnight_ledger::serialize::serialize(&unbalanced_tx, &mut res, network_id.0)?;
@@ -183,13 +163,21 @@ impl ParamsProver {
         Self(pp)
     }
 
-    pub fn read(bytes: Vec<u8>) -> Self {
-        Self(midnight_transient_crypto::proofs::ParamsProver::read(Cursor::new(bytes)).unwrap())
+    pub fn read(bytes: Vec<u8>) -> Result<Self, JsError> {
+        Ok(Self(
+            midnight_transient_crypto::proofs::ParamsProver::read(Cursor::new(bytes))
+                .map_err(|e| JsError::new(e.to_string().as_str()))?,
+        ))
     }
 
     pub fn downsize(&mut self, k: u8) {
         // TODO: not super optimal to clone this, as it is a big structure.
         self.0 = self.0.clone().downsize(k);
+    }
+
+    // this moves the object, but has better performance.
+    pub fn downsize_moved(self, k: u8) -> Self {
+        Self(self.0.downsize(k))
     }
 }
 
@@ -249,21 +237,6 @@ impl Ops {
 #[wasm_bindgen]
 pub struct Context {
     current_state: StateValue,
-    // spend: (
-    //     ProverKey,
-    //     VerifierKey,
-    //     midnight_transient_crypto::proofs::IrSource,
-    // ),
-    // output: (
-    //     ProverKey,
-    //     VerifierKey,
-    //     midnight_transient_crypto::proofs::IrSource,
-    // ),
-    // sign: (
-    //     ProverKey,
-    //     VerifierKey,
-    //     midnight_transient_crypto::proofs::IrSource,
-    // ),
     contract_address: Option<Address>,
     network_id: NetworkId,
 }
@@ -325,17 +298,11 @@ impl Context {
 
         let unbalanced_tx = unproven_tx
             // TODO: is cloning here fine?
-            .prove(rng.0.clone(), &pp.0, |loc| match &*loc.0 {
-                // "midnight/zswap/spend" => Some(self.spend.clone()),
-                // "midnight/zswap/output" => Some(self.output.clone()),
-                // "midnight/zswap/sign" => Some(self.sign.clone()),
-                "midnight/zswap/spend" => todo!(),
-                "midnight/zswap/output" => todo!(),
-                "midnight/zswap/sign" => todo!(),
-                _ => unreachable!(),
+            .prove(rng.0.clone(), &pp.0, |_loc| {
+                unreachable!("there is nothing to prove in a deploy transaction")
             })
             .await
-            .unwrap();
+            .map_err(|e| JsError::new(e.to_string().as_str()))?;
 
         let mut res = Vec::new();
         midnight_ledger::serialize::serialize(&unbalanced_tx, &mut res, self.network_id.0)?;
@@ -353,6 +320,14 @@ pub struct StateValue(midnight_onchain_runtime::state::StateValue);
 
 #[wasm_bindgen]
 impl StateValue {
+    pub fn deserialize(bytes: Uint8Array, network_id: NetworkId) -> Result<Self, JsError> {
+        let state_value =
+            midnight_ledger::serialize::deserialize(&bytes.to_vec()[..], network_id.0)
+                .map_err(|e| JsError::new(e.to_string().as_ref()))?;
+
+        Ok(Self(state_value))
+    }
+
     pub fn from_number(n: u64) -> Self {
         StateValue(midnight_onchain_runtime::state::StateValue::Cell(Arc::new(
             Fr::from(n).into(),

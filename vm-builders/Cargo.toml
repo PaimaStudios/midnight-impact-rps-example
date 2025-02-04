@@ -1,6 +1,6 @@
 [package]
 name = "midnight-vm-bindings"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Enzo Cioppettini <48031343+ecioppettini@users.noreply.github.com>"]
 edition = "2021"
 
