@@ -13,7 +13,7 @@ make_release:
     sed -i "s|\s*const pkg = await import('../../..');|  const pkg = await import('../../../wasm.js');|" www/pkg/snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src/workerHelpers.js
 
 pack:
-    RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals' \
+    RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--max-memory=4294967296' \
       rustup run nightly-2024-08-02 \
       wasm-pack build --release --target web . -d pkg \
       -- -Z build-std=panic_abort,std
