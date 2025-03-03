@@ -53,7 +53,7 @@ fn main() -> Result<(), JsValue> {
 
 #[wasm_bindgen]
 pub struct WasmProver {
-    proof_params: ParamsProver,
+    proof_params: Arc<ParamsProver>,
 }
 
 #[wasm_bindgen]
@@ -113,7 +113,7 @@ impl ZkConfig {
 impl WasmProver {
     pub fn new(pp: &ParamsProver) -> WasmProver {
         WasmProver {
-            proof_params: pp.clone(),
+            proof_params: Arc::new(pp.clone()),
         }
     }
 
@@ -138,11 +138,24 @@ impl WasmProver {
             ZkConfigEnum::Empty => None,
         };
 
-        let unbalanced_tx = tx
-            .prove(rng.0.clone(), &self.proof_params.0, |_loc| {
-                call_resolver.clone()
-            })
+        let (oneshot_tx, oneshot_rx) = futures::channel::oneshot::channel();
+
+        {
+            let proof_params = Arc::clone(&self.proof_params);
+            let rng = rng.0.clone();
+            rayon::spawn(move || {
+                let unbalanced_tx =
+                    futures::executor::block_on(
+                        tx.prove(rng, &proof_params.0, |_loc| call_resolver.clone()),
+                    );
+
+                oneshot_tx.send(unbalanced_tx).unwrap();
+            });
+        }
+
+        let unbalanced_tx = oneshot_rx
             .await
+            .unwrap()
             .map_err(|e| JsError::new(&e.to_string()))?;
 
         let mut res = Vec::new();

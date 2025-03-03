@@ -1,6 +1,6 @@
 [package]
 name = "midnight-vm-bindings"
-version = "0.2.0"
+version = "0.2.3"
 authors = ["Enzo Cioppettini <48031343+ecioppettini@users.noreply.github.com>"]
 edition = "2021"
 
@@ -23,6 +23,8 @@ midnight-transient-crypto = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 hex = { workspace = true }
+rayon = "1.10.0"
+futures = "0.3.31"
 
 # The `console_error_panic_hook` crate provides better debugging of panics by
 # logging them with `console.error`. This is great for development, but requires
