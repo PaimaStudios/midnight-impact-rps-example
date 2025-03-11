@@ -27,7 +27,7 @@ use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
-    io::Cursor,
+    io::{Cursor, Read as _},
     ops::Deref as _,
     sync::Arc,
 };
@@ -93,12 +93,18 @@ impl ZkConfig {
         )
         .map_err(|e| JsError::new(e.to_string().as_str()))?;
 
-        let ir: midnight_transient_crypto::proofs::IrSource =
-            midnight_ledger::serialize::deserialize(
-                &ir.to_vec()[..],
-                midnight_ledger::serialize::NetworkId::Undeployed,
-            )
-            .map_err(|e| JsError::new(e.to_string().as_str()))?;
+        let mut ir_reader = std::io::Cursor::new(ir.to_vec());
+
+        let ir = <midnight_transient_crypto::proofs::IrSource as midnight_ledger::serialize::Deserializable>::deserialize(
+            &mut ir_reader,
+            0,
+        )?;
+
+        let count = ir_reader.bytes().count();
+
+        if count != 0 {
+            return Err(JsError::new("Invalid IR"));
+        }
 
         Ok(ZkConfig(ZkConfigEnum::Circuit {
             pk,
