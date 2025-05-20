@@ -130,7 +130,8 @@ function buildProgram(): { zkir: IrSource, program: ImpactProgram } {
   console.log(builder.debug_repr());
 
   // only secret key
-  const num_private_inputs = 1;
+  // it needs to field elements
+  const num_private_inputs = 2;
 
   // generates the static constraints for the transcript.
   // 
@@ -142,7 +143,7 @@ function buildProgram(): { zkir: IrSource, program: ImpactProgram } {
   // gets the indexes of the private inputs.
   const private_inputs = zkir.private_inputs();
 
-  const public_key_hash = zkir.transient_hash(new Uint32Array([private_inputs[0]]));
+  const public_key_hash = zkir.transient_hash(new Uint32Array([private_inputs[0], private_inputs[1]]));
 
   // these are the reads (popeq).
   const output_indexes = zkir.output_indexes();
@@ -179,10 +180,9 @@ const { zkir, program } = buildProgram();
 
 ops.add(zkir);
 
-// to deploy to a network we would have to instead get the trusted setup from
-// somewhere else and call read.
-const k = 9;
-const pp = ParamsProver.generate(rng, k);
+// we need a url serving the kzg trusted setup
+const url = new URL(window.location.href);
+let pp = MidnightWasmParamsProvider.new(url.toString());
 
 // this also stores the contract address in the context (contract_address())
 const deploy_tx = await context.unbalanced_deploy_tx(rng, ops, pp);

@@ -1,14 +1,22 @@
 #![allow(clippy::new_without_default)]
 mod utils;
 
-use midnight_base_crypto::fab::{AlignmentSegment, ValueAtom};
-use midnight_impact_rps_example::{common::gen_transcript_constraints, dummy_contract_address};
+use midnight_base_crypto::{
+    data_provider::{FetchMode, MidnightDataProvider, OutputMode},
+    fab::{AlignmentSegment, ValueAtom},
+};
+use midnight_impact_rps_example::{
+    common::{gen_transcript_constraints, EXPECTED_DATA},
+    dummy_contract_address,
+};
 use midnight_ledger::{
     construct::ContractCallPrototype,
-    structure::{ContractCalls, ContractDeploy, Transaction},
+    prove::Resolver,
+    storage::db::InMemoryDB,
+    structure::{ContractCalls, ContractDeploy, ProofPreimage, ProvingData, Transaction},
     transient_crypto::{
         curve::Fr,
-        proofs::{ProofPreimage, ProverKey, VerifierKey},
+        proofs::{ProverKey, VerifierKey},
     },
     zswap::Offer,
 };
@@ -18,15 +26,17 @@ use midnight_onchain_runtime::{
     result_mode::ResultModeVerify,
     state::{ContractOperation, ContractState},
 };
-use midnight_transient_crypto::fab::AlignedValueExt as _;
 use midnight_transient_crypto::proofs::{
     ir::{Index, Instruction},
     KeyLocation,
 };
+use midnight_transient_crypto::{fab::AlignedValueExt as _, proofs::ParamsProverProvider};
 use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
+use sha2::Digest as _;
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    future::ready,
     io::{Cursor, Read as _},
     ops::Deref as _,
     sync::Arc,
@@ -52,9 +62,7 @@ fn main() -> Result<(), JsValue> {
 }
 
 #[wasm_bindgen]
-pub struct WasmProver {
-    proof_params: Arc<ParamsProver>,
-}
+pub struct WasmProver {}
 
 #[wasm_bindgen]
 pub struct ZkConfig(ZkConfigEnum);
@@ -117,10 +125,8 @@ impl ZkConfig {
 
 #[wasm_bindgen]
 impl WasmProver {
-    pub fn new(pp: &ParamsProver) -> WasmProver {
-        WasmProver {
-            proof_params: Arc::new(pp.clone()),
-        }
+    pub fn new() -> WasmProver {
+        WasmProver {}
     }
 
     pub async fn prove_tx(
@@ -129,8 +135,9 @@ impl WasmProver {
         unproven_tx: &Uint8Array,
         network_id: NetworkId,
         zk_config: &ZkConfig,
+        pp: &MidnightWasmParamsProvider,
     ) -> Result<Uint8Array, JsError> {
-        let tx: Transaction<ProofPreimage> =
+        let tx: Transaction<ProofPreimage, InMemoryDB> =
             midnight_ledger::serialize::deserialize(&unproven_tx.to_vec()[..], network_id.0)
                 .map_err(|e| JsError::new(e.to_string().as_ref()))?;
 
@@ -140,20 +147,33 @@ impl WasmProver {
                 vk,
                 ir,
                 circuit_id: _,
-            } => Some((pk.clone(), vk.clone(), ir.clone())),
+            } => Some(ProvingData::V4(pk.clone(), vk.clone(), ir.clone())),
             ZkConfigEnum::Empty => None,
         };
 
         let (oneshot_tx, oneshot_rx) = futures::channel::oneshot::channel();
 
         {
-            let proof_params = Arc::clone(&self.proof_params);
+            let pp = pp.clone();
             let rng = rng.0.clone();
             rayon::spawn(move || {
-                let unbalanced_tx =
-                    futures::executor::block_on(
-                        tx.prove(rng, &proof_params.0, |_loc| call_resolver.clone()),
-                    );
+                let unbalanced_tx = futures::executor::block_on(tx.prove(
+                    rng,
+                    &pp,
+                    &Resolver::new(
+                        // TODO: this is not really going to work in wasm anyway
+                        // since it'll try to use the filesystem
+                        midnight_ledger::zswap::prove::ZswapResolver(MidnightDataProvider::new(
+                            FetchMode::OnDemand,
+                            OutputMode::Log,
+                            vec![],
+                        )),
+                        Box::new(move |_loc| {
+                            let resolver = Box::new(ready(Ok(call_resolver.clone())));
+                            Box::pin(resolver)
+                        }),
+                    ),
+                ));
 
                 oneshot_tx.send(unbalanced_tx).unwrap();
             });
@@ -167,36 +187,6 @@ impl WasmProver {
         let mut res = Vec::new();
         midnight_ledger::serialize::serialize(&unbalanced_tx, &mut res, network_id.0)?;
         Ok(Uint8Array::from(&res[..]))
-    }
-}
-
-#[wasm_bindgen]
-#[derive(Clone)]
-pub struct ParamsProver(midnight_transient_crypto::proofs::ParamsProver);
-
-#[wasm_bindgen]
-impl ParamsProver {
-    pub fn generate(rng: &mut Rng, k: u8) -> Self {
-        let pp = midnight_transient_crypto::proofs::ParamsProver::gen(&mut rng.0, k);
-
-        Self(pp)
-    }
-
-    pub fn read(bytes: Vec<u8>) -> Result<Self, JsError> {
-        Ok(Self(
-            midnight_transient_crypto::proofs::ParamsProver::read(Cursor::new(bytes))
-                .map_err(|e| JsError::new(e.to_string().as_str()))?,
-        ))
-    }
-
-    pub fn downsize(&mut self, k: u8) {
-        // TODO: not super optimal to clone this, as it is a big structure.
-        self.0 = self.0.clone().downsize(k);
-    }
-
-    // this moves the object, but has better performance.
-    pub fn downsize_moved(self, k: u8) -> Self {
-        Self(self.0.downsize(k))
     }
 }
 
@@ -278,8 +268,18 @@ impl Context {
         &mut self,
         rng: &mut Rng,
         ops: &mut Ops,
-        pp: &ParamsProver,
+        pp: &MidnightWasmParamsProvider,
     ) -> Result<Uint8Array, JsError> {
+        let res = self.unbalanced_deploy_tx_inner(rng, ops, pp).await?;
+        Ok(Uint8Array::from(&res[..]))
+    }
+
+    async fn unbalanced_deploy_tx_inner(
+        &mut self,
+        rng: &mut Rng,
+        ops: &mut Ops,
+        pp: &impl ParamsProverProvider,
+    ) -> Result<Vec<u8>, JsError> {
         let guaranted_coins = Offer {
             inputs: vec![],
             outputs: vec![],
@@ -297,7 +297,7 @@ impl Context {
         };
 
         for op in &mut ops.0 {
-            let pp = op.proof_params(pp).await;
+            let pp = op.proof_params_inner(pp).await;
 
             contract_state.operations = contract_state.operations.insert(
                 midnight_onchain_runtime::state::EntryPointBuf(op.entry_point.clone().into_bytes()),
@@ -317,15 +317,32 @@ impl Context {
 
         let unbalanced_tx = unproven_tx
             // TODO: is cloning here fine?
-            .prove(rng.0.clone(), &pp.0, |_loc| {
-                unreachable!("there is nothing to prove in a deploy transaction")
-            })
+            .prove(
+                rng.0.clone(),
+                pp,
+                &Resolver::new(
+                    // TODO: this is not really going to work in wasm anyway
+                    // since it'll try to use the filesystem
+                    midnight_ledger::zswap::prove::ZswapResolver(MidnightDataProvider::new(
+                        FetchMode::OnDemand,
+                        OutputMode::Log,
+                        EXPECTED_DATA.to_vec(),
+                    )),
+                    Box::new(move |_loc| {
+                        unreachable!()
+                        // let resolver = Box::new(ready(Ok(call_resolver.clone())));
+
+                        // Box::pin(resolver)
+                    }),
+                ),
+                // |_loc| unreachable!("there is nothing to prove in a deploy transaction"),
+            )
             .await
             .map_err(|e| JsError::new(e.to_string().as_str()))?;
 
         let mut res = Vec::new();
         midnight_ledger::serialize::serialize(&unbalanced_tx, &mut res, self.network_id.0)?;
-        Ok(Uint8Array::from(&res[..]))
+        Ok(res)
     }
 
     pub fn get_state(&self) -> StateValue {
@@ -335,7 +352,7 @@ impl Context {
 
 #[wasm_bindgen]
 #[derive(Clone)]
-pub struct StateValue(midnight_onchain_runtime::state::StateValue);
+pub struct StateValue(midnight_onchain_runtime::state::StateValue<InMemoryDB>);
 
 #[wasm_bindgen]
 impl StateValue {
@@ -396,12 +413,28 @@ impl AlignedValue {
         ))
     }
 
-    pub fn value_only_field_repr(&self) -> FrValue {
+    pub fn from_bytes(bytes: &[u8], n: u32) -> AlignedValue {
+        let align = midnight_base_crypto::fab::Alignment::singleton(
+            midnight_base_crypto::fab::AlignmentAtom::Bytes { length: n },
+        );
+
+        let aligned_value = midnight_base_crypto::fab::AlignedValue::new(
+            midnight_base_crypto::fab::Value(vec![midnight_base_crypto::fab::ValueAtom(
+                bytes.to_vec(),
+            )]),
+            align,
+        )
+        .expect("Aligned value should match alignment");
+
+        AlignedValue(aligned_value)
+    }
+
+    pub fn value_only_field_repr(&self) -> FrValues {
         let mut frs = vec![];
 
         self.0.value_only_field_repr(&mut frs);
 
-        FrValue(frs[0])
+        FrValues(frs.into_iter().map(FrValue).collect())
     }
 }
 
@@ -458,7 +491,11 @@ impl std::fmt::Debug for IrSource {
 
 #[wasm_bindgen]
 impl IrSource {
-    pub async fn proof_params(&mut self, pp: &ParamsProver) -> ProofParams {
+    pub async fn proof_params(&mut self, pp: &MidnightWasmParamsProvider) -> ProofParams {
+        self.proof_params_inner(pp).await
+    }
+
+    async fn proof_params_inner(&mut self, pp: &impl ParamsProverProvider) -> ProofParams {
         if let Some(pp) = &self.proof_params {
             return pp.clone();
         }
@@ -469,13 +506,18 @@ impl IrSource {
             instructions: Arc::new(self.instructions.clone()),
         };
 
-        let (pk, vk) = inner.keygen(&pp.0).await.unwrap();
+        eprintln!("IrSource.:proof_params");
+        let (pk, vk) = inner.keygen(pp).await.unwrap();
 
         let pp = ProofParams { pk, vk };
 
         self.proof_params.replace(pp.clone());
 
         pp
+    }
+
+    pub fn get_k(&self) -> u8 {
+        self.inner().k()
     }
 
     pub fn num_inputs(&self) -> u32 {
@@ -688,6 +730,75 @@ impl IrSource {
 
 #[wasm_bindgen]
 #[derive(Clone)]
+pub struct MidnightWasmParamsProvider {
+    base_url: String,
+}
+
+impl MidnightWasmParamsProvider {
+    pub const LOCAL_STORAGE_SCOPE: &'static str = "midnight-vm-bindings-prover-params-cache";
+}
+
+#[wasm_bindgen]
+impl MidnightWasmParamsProvider {
+    pub fn new(base_url: String) -> Self {
+        Self { base_url }
+    }
+}
+
+impl midnight_transient_crypto::proofs::ParamsProverProvider for MidnightWasmParamsProvider {
+    async fn get_params(
+        &self,
+        k: u8,
+    ) -> std::io::Result<midnight_transient_crypto::proofs::ParamsProver> {
+        let data = EXPECTED_DATA[k as usize - 10];
+
+        let mut url = self.base_url.clone();
+        url.push('/');
+        url.push_str(data.0);
+
+        let raw = reqwest::Client::new()
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(|_e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Failed to fetch data from {url}"),
+                )
+            })?
+            .bytes()
+            .await
+            .map_err(|_e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Expected response to be bytes".to_string(),
+                )
+            })?;
+
+        let mut hasher = sha2::Sha256::new();
+
+        hasher.update(&raw);
+
+        let hash = <[u8; 32]>::from(hasher.finalize());
+
+        if hash != data.1 {
+            Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "Hash mismatch. This means the file may be outdated or corrupted. This may be fixing by clearing the cache.".to_string(),
+            ))
+        } else {
+            midnight_transient_crypto::proofs::ParamsProver::read(Cursor::new(raw)).map_err(|_e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Can't deserialize prover params".to_string(),
+                )
+            })
+        }
+    }
+}
+
+#[wasm_bindgen]
+#[derive(Clone)]
 pub struct ProofParams {
     pk: ProverKey,
     vk: VerifierKey,
@@ -728,7 +839,7 @@ impl Alignment {
 
 #[wasm_bindgen]
 pub struct ImpactProgram {
-    program: Vec<Op<ResultModeVerify>>,
+    program: Vec<Op<ResultModeVerify, InMemoryDB>>,
     pushed_inputs: HashSet<usize>,
     entry_point: String,
 }
@@ -977,11 +1088,12 @@ pub struct QueryResults {
     transcript: Transcript,
     results: midnight_onchain_runtime::context::QueryResults<
         midnight_onchain_runtime::result_mode::ResultModeGather,
+        InMemoryDB,
     >,
 }
 
 #[wasm_bindgen]
-pub struct Transcript(Vec<Op<ResultModeVerify>>);
+pub struct Transcript(Vec<Op<ResultModeVerify, InMemoryDB>>);
 
 #[wasm_bindgen]
 pub fn transient_commit(value: &FrValue, opening: &FrValue) -> FrValue {
@@ -991,8 +1103,10 @@ pub fn transient_commit(value: &FrValue, opening: &FrValue) -> FrValue {
 }
 
 #[wasm_bindgen]
-pub fn transient_hash(value: &FrValue) -> FrValue {
-    FrValue(midnight_transient_crypto::hash::transient_hash(&[value.0]))
+pub fn transient_hash(values: &FrValues) -> FrValue {
+    FrValue(midnight_transient_crypto::hash::transient_hash(
+        &values.0.iter().map(|value| value.0).collect::<Vec<_>>(),
+    ))
 }
 
 #[wasm_bindgen]
@@ -1053,6 +1167,7 @@ impl AlignedValues {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn make_unbalanced_transaction_inner(
     entry_point: String,
     query_results: &QueryResults,
@@ -1061,7 +1176,7 @@ async fn make_unbalanced_transaction_inner(
     ir: &mut IrSource,
     rng: &mut Rng,
     context: &Context,
-    pp: &ParamsProver,
+    pp: &impl ParamsProverProvider,
 ) -> Vec<u8> {
     let guaranted_coins = Offer {
         inputs: vec![],
@@ -1076,30 +1191,32 @@ async fn make_unbalanced_transaction_inner(
     let inputs_aligned = inputs.0.iter().map(|av| av.0.clone()).collect::<Vec<_>>();
     let input = midnight_base_crypto::fab::AlignedValue::concat(&inputs_aligned);
 
-    let cc = cc.add_call(ContractCallPrototype {
-        address: context.contract_address.clone().unwrap().0,
-        entry_point: midnight_onchain_runtime::state::EntryPointBuf(
-            entry_point.clone().into_bytes(),
-        ),
-        op: ContractOperation::new(None),
-        guaranteed_public_transcript: Some(midnight_onchain_runtime::transcript::Transcript {
-            gas: query_results.results.gas_cost,
-            effects: query_results.results.context.effects.clone(),
-            program: query_results.transcript.0.clone(),
-        }),
-        fallible_public_transcript: None,
-        private_transcript_outputs: private_transcript_outputs
-            .0
-            .iter()
-            .map(|av| av.0.clone())
-            .collect(),
-        input,
-        output: midnight_base_crypto::fab::AlignedValue::concat([]),
-        communication_commitment_rand: rng.0.gen(),
-        key_location: KeyLocation(Cow::Owned(entry_point)),
-    });
+    let cc =
+        cc.add_call::<midnight_transient_crypto::proofs::ProofPreimage>(ContractCallPrototype {
+            address: context.contract_address.clone().unwrap().0,
+            entry_point: midnight_onchain_runtime::state::EntryPointBuf(
+                entry_point.clone().into_bytes(),
+            ),
+            op: ContractOperation::new(None),
+            guaranteed_public_transcript: Some(midnight_onchain_runtime::transcript::Transcript {
+                gas: query_results.results.gas_cost,
+                effects: query_results.results.context.effects.clone(),
+                program: query_results.transcript.0.clone(),
+                version: None,
+            }),
+            fallible_public_transcript: None,
+            private_transcript_outputs: private_transcript_outputs
+                .0
+                .iter()
+                .map(|av| av.0.clone())
+                .collect(),
+            input,
+            output: midnight_base_crypto::fab::AlignedValue::concat([]),
+            communication_commitment_rand: rng.0.gen(),
+            key_location: KeyLocation(Cow::Owned(entry_point)),
+        });
 
-    let unproven_tx: Transaction<ProofPreimage> =
+    let unproven_tx: Transaction<ProofPreimage, InMemoryDB> =
         Transaction::new(guaranted_coins, fallible_coins, Some(cc));
 
     match &unproven_tx {
@@ -1112,8 +1229,8 @@ async fn make_unbalanced_transaction_inner(
                 .first()
                 .unwrap()
             {
-                midnight_ledger::structure::ContractAction::Call(contract_call) => {
-                    log(&format!("{:?}", contract_call.proof));
+                midnight_ledger::structure::ContractAction::Call(_contract_call) => {
+                    // log(&format!("{:?}", contract_call.proof));
                 }
                 midnight_ledger::structure::ContractAction::Deploy(_) => (),
                 midnight_ledger::structure::ContractAction::Maintain(_) => (),
@@ -1122,21 +1239,32 @@ async fn make_unbalanced_transaction_inner(
         Transaction::ClaimMint(_) => (),
     }
 
-    let proof_params = ir.proof_params(pp).await;
+    let proof_params = ir.proof_params_inner(pp).await;
 
-    let call_resolver = (
+    let call_resolver = Some(ProvingData::V4(
         proof_params.pk.clone(),
         proof_params.vk.clone(),
         ir.inner().clone(),
-    );
+    ));
 
     let unbalanced_tx = unproven_tx
-        .prove(rng.0.clone(), &pp.0, |loc| match &*loc.0 {
-            "midnight/zswap/spend" => unreachable!(),
-            "midnight/zswap/output" => unreachable!(),
-            "midnight/zswap/sign" => unreachable!(),
-            _ => Some(call_resolver.clone()),
-        })
+        .prove(
+            rng.0.clone(),
+            pp,
+            &Resolver::new(
+                // TODO: this is not really going to work in wasm anyway
+                // since it'll try to use the filesystem
+                midnight_ledger::zswap::prove::ZswapResolver(MidnightDataProvider::new(
+                    FetchMode::OnDemand,
+                    OutputMode::Log,
+                    EXPECTED_DATA.to_vec(),
+                )),
+                Box::new(move |_loc| {
+                    let resolver = Box::new(ready(Ok(call_resolver.clone())));
+                    Box::pin(resolver)
+                }),
+            ),
+        )
         .await;
 
     let unbalanced_tx = match unbalanced_tx {
@@ -1152,6 +1280,7 @@ async fn make_unbalanced_transaction_inner(
 }
 
 #[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
 pub async fn make_unbalanced_transaction(
     entry_point: String,
     query_results: &QueryResults,
@@ -1160,7 +1289,7 @@ pub async fn make_unbalanced_transaction(
     ir: &mut IrSource,
     rng: &mut Rng,
     context: &Context,
-    pp: &ParamsProver,
+    pp: &MidnightWasmParamsProvider,
 ) -> Result<Uint8Array, JsValue> {
     let res = make_unbalanced_transaction_inner(
         entry_point,
@@ -1179,7 +1308,7 @@ pub async fn make_unbalanced_transaction(
 
 #[wasm_bindgen]
 pub struct ContractStateBuilder {
-    query_context: midnight_onchain_runtime::context::QueryContext,
+    query_context: midnight_onchain_runtime::context::QueryContext<InMemoryDB>,
     num_entries: u32,
 }
 
@@ -1208,9 +1337,11 @@ impl ContractStateBuilder {
         // NOTE: this object has to be initialized with Null entries since arrays
         // seem to have only a fixed size.
         let state_value = midnight_ledger::storage::storage::Array::from(
-            std::iter::repeat(midnight_onchain_runtime::state::StateValue::Null)
-                .take((num_entries) as usize)
-                .collect::<Vec<_>>(),
+            std::iter::repeat_n(
+                midnight_onchain_runtime::state::StateValue::Null,
+                (num_entries) as usize,
+            )
+            .collect::<Vec<_>>(),
         );
 
         contract_state.data = midnight_onchain_runtime::state::StateValue::Array(state_value);
@@ -1274,179 +1405,297 @@ pub fn dummy_contract_addr() -> Address {
     Address(dummy_contract_address())
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use std::{io::Cursor, sync::LazyLock};
+#[cfg(test)]
+mod tests {
+    use crate::{
+        make_unbalanced_transaction_inner, transient_commit, transient_hash, AlignedValue,
+        AlignedValues, Alignment, Context, ContractStateBuilder, FrValue, ImpactProgram, Key,
+        NetworkId, Ops, Rng, StateValue,
+    };
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use midnight_impact_rps_example::{
+        common::EXPECTED_DATA, COMMIT_ENTRY_POINT, INDEX_PLAYER1_COMMITMENT, INDEX_PLAYER1_PK,
+        INDEX_PLAYER1_VICTORIES, INDEX_PLAYER2_COMMITMENT, INDEX_PLAYER2_PK,
+        INDEX_PLAYER2_VICTORIES, INDEX_TIES,
+    };
+    use midnight_transient_crypto::curve::Fr;
 
-//     use crate::{
-//         make_unbalanced_transaction_inner, transient_commit, transient_hash, AlignedValue,
-//         AlignedValues, Alignment, Context, ContractStateBuilder, FrValue, ImpactProgram, Key,
-//         ParamsProver, Rng, StateValue,
-//     };
-//     use midnight_impact_rps_example::{
-//         COMMIT_ENTRY_POINT, INDEX_PLAYER1_COMMITMENT, INDEX_PLAYER1_PK, INDEX_PLAYER1_VICTORIES,
-//         INDEX_PLAYER2_COMMITMENT, INDEX_PLAYER2_PK, INDEX_PLAYER2_VICTORIES, INDEX_TIES,
-//     };
-//     use midnight_transient_crypto::curve::Fr;
+    pub const PLAYER1_SK: [u8; 30] = [2u8; 30];
+    pub const PLAYER2_SK: [u8; 30] = [3u8; 30];
 
-//     const KZG: &[u8] = include_bytes!(concat!(env!("MIDNIGHT_LEDGER_STATIC_DIR"), "/kzg"));
+    #[tokio::test]
+    pub async fn rps_example() {
+        let pp =
+            MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, EXPECTED_DATA.to_vec());
 
-//     static PP: LazyLock<ParamsProver> = LazyLock::new(|| {
-//         let mut pp =
-//             midnight_transient_crypto::proofs::ParamsProver::read(Cursor::new(KZG)).unwrap();
+        let mut builder = ImpactProgram::empty("commit".to_string());
 
-//         pp.downsize(12);
+        builder.dup(0);
+        builder.push_input(false, &Alignment::single_field());
+        builder.idx(false, false, vec![Key::stack()]);
+        builder.popeq(false, &Alignment::single_field());
+        builder.push_input(false, &Alignment::single_field());
+        builder.dup(1);
+        builder.dup(1);
+        builder.idx(false, false, vec![Key::stack()]);
+        builder.r#type();
+        builder.popeq(false, &Alignment::bytes(1));
+        builder.push_input(true, &Alignment::single_field());
+        builder.ins(false, 1);
 
-//         ParamsProver(pp)
-//     });
+        let num_private_inputs = 3;
 
-//     #[tokio::test]
-//     pub async fn basic() {
-//         let mut builder = ImpactProgram::empty("commit".to_string());
+        let mut ir = builder.build_base_zkir(num_private_inputs);
 
-//         builder.dup(0);
-//         builder.push_input(false, &Alignment::single_field());
-//         builder.idx(false, false, vec![Key::stack()]);
-//         builder.popeq(false, &Alignment::single_field());
-//         builder.push_input(false, &Alignment::single_field());
-//         builder.dup(1);
-//         builder.dup(1);
-//         builder.idx(false, false, vec![Key::stack()]);
-//         builder.r#type();
-//         builder.popeq(false, &Alignment::bytes(1));
-//         builder.push_input(true, &Alignment::single_field());
-//         builder.ins(false, 1);
+        let private_inputs = ir.private_inputs.clone();
+        let public_key_hash = ir.transient_hash(vec![private_inputs[0]]);
+        ir.constrain_eq(public_key_hash, ir.output_indexes[0]);
+        ir.constrain_eq(
+            *ir.dedup.get(&Fr::from(0x01)).unwrap(),
+            ir.output_indexes[1],
+        );
+        let commitment = ir.transient_hash(vec![private_inputs[2], private_inputs[1]]);
+        ir.constrain_eq(commitment, 2);
+        let zconst = ir.load_imm(&FrValue(Fr::from(0x0)));
+        let tconst = ir.load_imm(&FrValue(Fr::from(0x2)));
+        let teq1 = ir.test_eq(private_inputs[1], *ir.dedup.get(&Fr::from(0x01)).unwrap());
+        let teq2 = ir.test_eq(private_inputs[1], zconst);
+        let teq3 = ir.test_eq(private_inputs[1], tconst);
+        let fa = ir.add(teq1, teq2);
+        let cond = ir.add(teq3, fa);
+        ir.assert(cond);
 
-//         let num_private_inputs = 3;
+        // let query_context = init_state();
 
-//         let mut ir = builder.build_base_zkir(num_private_inputs);
+        let mut csb = ContractStateBuilder::initial_query_context(vec!["commit".to_string()], 7);
 
-//         let private_inputs = ir.private_inputs.clone();
-//         let public_key_hash = ir.transient_hash(vec![private_inputs[0]]);
-//         ir.constrain_eq(public_key_hash, ir.output_indexes[0]);
-//         ir.constrain_eq(
-//             *ir.dedup.get(&Fr::from(0x01)).unwrap(),
-//             ir.output_indexes[1],
-//         );
-//         let commitment = ir.transient_hash(vec![private_inputs[2], private_inputs[1]]);
-//         ir.constrain_eq(commitment, 2);
-//         let zconst = ir.load_imm(&FrValue(Fr::from(0x0)));
-//         let tconst = ir.load_imm(&FrValue(Fr::from(0x2)));
-//         let teq1 = ir.test_eq(private_inputs[1], *ir.dedup.get(&Fr::from(0x01)).unwrap());
-//         let teq2 = ir.test_eq(private_inputs[1], zconst);
-//         let teq3 = ir.test_eq(private_inputs[1], tconst);
-//         let fa = ir.add(teq1, teq2);
-//         let cond = ir.add(teq3, fa);
-//         ir.assert(cond);
+        csb.insert_to_state_array(
+            INDEX_PLAYER1_VICTORIES,
+            StateValue::cell(&FrValue::from_u64(0u64).to_aligned_value()),
+        );
+        csb.insert_to_state_array(
+            INDEX_PLAYER2_VICTORIES,
+            StateValue::cell(&FrValue::from_u64(0u64).to_aligned_value()),
+        );
+        csb.insert_to_state_array(
+            INDEX_TIES,
+            StateValue::cell(&FrValue::from_u64(0u64).to_aligned_value()),
+        );
 
-//         // let query_context = init_state();
+        let player1_pk = {
+            let address_repr = AlignedValue::from_bytes(&PLAYER1_SK, 30).value_only_field_repr();
+            transient_hash(&address_repr)
+        };
 
-//         let mut csb = ContractStateBuilder::initial_query_context(vec!["commit".to_string()], 7);
+        let player2_pk = {
+            let address_repr = AlignedValue::from_bytes(&PLAYER2_SK, 30).value_only_field_repr();
+            transient_hash(&address_repr)
+        };
 
-//         csb.insert_to_state_array(
-//             INDEX_PLAYER1_VICTORIES,
-//             StateValue::cell(&FrValue::from_u64(0u64).to_aligned_value()),
-//         );
-//         csb.insert_to_state_array(
-//             INDEX_PLAYER2_VICTORIES,
-//             StateValue::cell(&FrValue::from_u64(0u64).to_aligned_value()),
-//         );
-//         csb.insert_to_state_array(
-//             INDEX_TIES,
-//             StateValue::cell(&FrValue::from_u64(0u64).to_aligned_value()),
-//         );
+        csb.insert_to_state_array(
+            INDEX_PLAYER1_PK,
+            StateValue::cell(&player1_pk.to_aligned_value()),
+        );
+        csb.insert_to_state_array(
+            INDEX_PLAYER2_PK,
+            StateValue::cell(&player2_pk.to_aligned_value()),
+        );
+        csb.insert_to_state_array(INDEX_PLAYER1_COMMITMENT, StateValue::null());
+        csb.insert_to_state_array(INDEX_PLAYER2_COMMITMENT, StateValue::null());
 
-//         let player1_pk = {
-//             let address_repr = AlignedValue::from_bytes_32(&PLAYER1_SK).value_only_field_repr();
-//             transient_hash(&address_repr)
-//         };
+        let mut context = Context::new(
+            StateValue(csb.query_context.state),
+            crate::NetworkId::undeployed(),
+        );
 
-//         let player2_pk = {
-//             let address_repr = AlignedValue::from_bytes_32(&PLAYER2_SK).value_only_field_repr();
-//             transient_hash(&address_repr)
-//         };
+        // let mut context = Context::new(StateValue(query_context.context.state));
 
-//         csb.insert_to_state_array(
-//             INDEX_PLAYER1_PK,
-//             StateValue::cell(&player1_pk.to_aligned_value()),
-//         );
-//         csb.insert_to_state_array(
-//             INDEX_PLAYER2_PK,
-//             StateValue::cell(&player2_pk.to_aligned_value()),
-//         );
-//         csb.insert_to_state_array(INDEX_PLAYER1_COMMITMENT, StateValue::null());
-//         csb.insert_to_state_array(INDEX_PLAYER2_COMMITMENT, StateValue::null());
+        let mut rng = Rng::new();
 
-//         let mut context = Context::new(
-//             StateValue(csb.query_context.state),
-//             crate::NetworkId::undeployed(),
-//         );
-//         // let mut context = Context::new(StateValue(query_context.context.state));
+        let mut ops = Ops::empty();
+        ops.add(&ir);
+        context
+            .unbalanced_deploy_tx_inner(&mut rng, &mut ops, &pp)
+            .await
+            .unwrap();
 
-//         let mut rng = Rng::new();
-//         let opening1 = rng.random_fr();
+        let opening1 = rng.random_fr();
 
-//         // scissors
-//         let value1 = FrValue(midnight_transient_crypto::curve::Fr::from(1));
+        // scissors
+        let value1 = FrValue(midnight_transient_crypto::curve::Fr::from(1));
 
-//         let commitment = transient_commit(&value1, &opening1);
+        let commitment = transient_commit(&value1, &opening1);
 
-//         let public_inputs = vec![
-//             StateValue::from_number(3),
-//             StateValue::from_number(5),
-//             StateValue::cell(&commitment.to_aligned_value()),
-//         ];
+        let public_inputs = vec![
+            StateValue::from_number(3),
+            StateValue::from_number(5),
+            StateValue::cell(&commitment.to_aligned_value()),
+        ];
 
-//         let query_results = builder.run(&mut context, public_inputs);
+        let query_results = builder.run(&mut context, public_inputs);
 
-//         dbg!(&query_results.transcript.0);
+        dbg!(&query_results.transcript.0);
 
-//         let mut private_transcript_outputs: Vec<AlignedValue> = vec![];
+        let mut private_transcript_outputs: Vec<AlignedValue> = vec![];
 
-//         {
-//             let player1_sk = AlignedValue::from_bytes_32(&PLAYER1_SK);
-//             private_transcript_outputs.push(player1_sk.value_only_field_repr().to_aligned_value());
-//             private_transcript_outputs.push(value1.to_aligned_value());
-//             private_transcript_outputs.push(opening1.to_aligned_value());
-//         }
+        {
+            let player1_sk = AlignedValue::from_bytes(&PLAYER1_SK, 30);
+            private_transcript_outputs
+                .push(player1_sk.value_only_field_repr().0[0].to_aligned_value());
+            private_transcript_outputs.push(value1.to_aligned_value());
+            private_transcript_outputs.push(opening1.to_aligned_value());
+        }
 
-//         let mut inputs = vec![];
+        let mut inputs = vec![];
 
-//         {
-//             inputs.push(
-//                 FrValue(Fr::from(midnight_impact_rps_example::INDEX_PLAYER1_PK)).to_aligned_value(),
-//             );
-//             inputs.push(
-//                 FrValue(Fr::from(
-//                     midnight_impact_rps_example::INDEX_PLAYER1_PK
-//                         + midnight_impact_rps_example::INDEX_PLAYER1_COMMITMENT
-//                         - midnight_impact_rps_example::INDEX_PLAYER1_PK,
-//                 ))
-//                 .to_aligned_value(),
-//             );
-//             inputs.push(commitment.to_aligned_value());
-//         }
+        {
+            inputs.push(
+                FrValue(Fr::from(midnight_impact_rps_example::INDEX_PLAYER1_PK)).to_aligned_value(),
+            );
+            inputs.push(
+                FrValue(Fr::from(
+                    midnight_impact_rps_example::INDEX_PLAYER1_PK
+                        + midnight_impact_rps_example::INDEX_PLAYER1_COMMITMENT
+                        - midnight_impact_rps_example::INDEX_PLAYER1_PK,
+                ))
+                .to_aligned_value(),
+            );
+            inputs.push(commitment.to_aligned_value());
+        }
 
-//         dbg!(&private_transcript_outputs);
-//         dbg!(&inputs);
+        dbg!(&private_transcript_outputs);
+        dbg!(&inputs);
 
-//         let tx = make_unbalanced_transaction_inner(
-//             COMMIT_ENTRY_POINT.to_string(),
-//             &query_results,
-//             &AlignedValues(inputs),
-//             &AlignedValues(private_transcript_outputs),
-//             &mut ir,
-//             &mut rng,
-//             &context,
-//             pp,
-//         )
-//         .await;
+        let tx = make_unbalanced_transaction_inner(
+            COMMIT_ENTRY_POINT.to_string(),
+            &query_results,
+            &AlignedValues(inputs),
+            &AlignedValues(private_transcript_outputs),
+            &mut ir,
+            &mut rng,
+            &context,
+            &pp,
+        )
+        .await;
 
-//         dbg!(&tx);
-//     }
+        dbg!(&tx);
+    }
 
-//     // the secrets for authentication
-//     // this means the players are fixed for this particular example.
-//     pub const PLAYER1_SK: [u8; 32] = [2u8; 32];
-//     pub const PLAYER2_SK: [u8; 32] = [3u8; 32];
-// }
+    #[tokio::test]
+    pub async fn simple_program_example() {
+        let pp =
+            MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, EXPECTED_DATA.to_vec());
+
+        const STATE_INDEX_A: u64 = 0;
+        const STATE_INDEX_B: u64 = 1;
+        const STATE_INDEX_C: u64 = 2;
+        const STATE_INDEX_PK: u64 = 3;
+
+        let mut builder = ImpactProgram::empty("op1".to_string());
+
+        // the state is in the top of the stack.
+        builder.dup(0);
+
+        // we read the public key of the admin from the state.
+        // we can access this in the zkir through output_indexes()[0]
+        builder.idx(
+            false,
+            false,
+            vec![Key::value(AlignedValue::from_fr(&FrValue::from_u64(
+                STATE_INDEX_PK,
+            )))],
+        );
+        builder.popeq(false, &Alignment::single_field());
+
+        builder.push_constant(false, StateValue::from_number(STATE_INDEX_A));
+        builder.push_input(true, &Alignment::single_field());
+        builder.ins(false, 1);
+
+        builder.push_constant(false, StateValue::from_number(STATE_INDEX_B));
+        builder.push_input(true, &Alignment::single_field());
+        builder.ins(false, 1);
+
+        builder.push_constant(false, StateValue::from_number(STATE_INDEX_C));
+        builder.push_input(true, &Alignment::single_field());
+        builder.ins(false, 1);
+
+        let num_private_inputs = 2;
+
+        let mut ir = builder.build_base_zkir(num_private_inputs);
+
+        let private_inputs = ir.private_inputs.clone();
+        let public_key_hash = ir.transient_hash(vec![private_inputs[0], private_inputs[1]]);
+
+        // these are the reads (popeq).
+        let output_indexes = ir.output_indexes();
+
+        ir.constrain_eq(output_indexes[0], public_key_hash);
+
+        // inputs are always at the beginning of the memory, so:
+        //
+        // 0 is the first push_input (A)
+        // 1 is the second push_input (B)
+        let a_plus_b = ir.mul(0, 1);
+        // 2 is the third push_input (C)
+        ir.constrain_eq(a_plus_b, 2);
+
+        // let query_context = init_state();
+
+        let mut csb = ContractStateBuilder::initial_query_context(vec!["op1".to_string()], 4);
+
+        csb.insert_to_state_array(STATE_INDEX_A, StateValue::null());
+        csb.insert_to_state_array(STATE_INDEX_B, StateValue::null());
+        csb.insert_to_state_array(STATE_INDEX_C, StateValue::null());
+
+        let mut rng = Rng::new();
+        let admin_sk = AlignedValue::from_bytes_32(&[[1u8; 16], [2u8; 16]].concat());
+
+        dbg!(admin_sk.value_only_field_repr().0);
+        let admin_pk = transient_hash(&admin_sk.value_only_field_repr());
+
+        csb.insert_to_state_array(
+            STATE_INDEX_PK,
+            StateValue::cell(&admin_pk.to_aligned_value()),
+        );
+
+        let mut context = Context::new(csb.get_state(), NetworkId::undeployed());
+
+        let mut ops = Ops::empty();
+        ops.add(&ir);
+
+        let _deploy_tx = context
+            .unbalanced_deploy_tx_inner(&mut rng, &mut ops, &pp)
+            .await
+            .unwrap();
+
+        let public_inputs = vec![
+            FrValue::from_u64(3).to_aligned_value(),
+            FrValue::from_u64(2).to_aligned_value(),
+            FrValue::from_u64(6).to_aligned_value(),
+        ];
+
+        let query_results = builder.run(
+            &mut context,
+            public_inputs.iter().map(StateValue::cell).collect(),
+        );
+
+        let mut private_transcript_outputs = AlignedValues::empty();
+
+        private_transcript_outputs.push(&admin_sk);
+
+        let public_inputs = AlignedValues::from_array(public_inputs);
+        let _tx = make_unbalanced_transaction_inner(
+            builder.entry_point(),
+            &query_results,
+            &public_inputs,
+            &private_transcript_outputs,
+            &mut ir,
+            &mut rng,
+            &context,
+            &pp,
+        )
+        .await;
+
+        // console.log("contract call tx", uint8ArrayToHex(tx));
+    }
+}

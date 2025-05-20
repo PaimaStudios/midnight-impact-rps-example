@@ -1,6 +1,6 @@
 [package]
 name = "midnight-vm-bindings"
-version = "0.2.4"
+version = "0.3.0"
 authors = ["Enzo Cioppettini <48031343+ecioppettini@users.noreply.github.com>"]
 edition = "2021"
 
@@ -31,6 +31,9 @@ futures = "0.3.31"
 # all the `std::fmt` and `std::panicking` infrastructure, so isn't great for
 # code size when deploying.
 console_error_panic_hook = { version = "0.1.7", optional = true }
+url = "2.5.4"
+reqwest = "0.12.15"
+sha2 = "0.10.9"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"

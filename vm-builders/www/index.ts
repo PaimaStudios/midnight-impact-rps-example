@@ -1,4 +1,4 @@
-import init, { AlignedValue, AlignedValues, Alignment, Context, ContractStateBuilder, FrValue, FrValues, ImpactProgram, IrSource, Key, NetworkId, Ops, Rng, StateValue, initThreadPool, make_unbalanced_transaction, transient_commit, transient_hash } from './pkg/wasm.js';
+import init, { AlignedValue, AlignedValues, Alignment, Context, ContractStateBuilder, FrValue, FrValues, ImpactProgram, IrSource, Key, NetworkId, Ops, ParamsProver, Rng, StateValue, initThreadPool, make_unbalanced_transaction, transient_commit, transient_hash } from './pkg/midnight_vm_bindings.js';
 
 const INDEX_PLAYER1_VICTORIES = 0n;
 const INDEX_PLAYER2_VICTORIES = 1n;

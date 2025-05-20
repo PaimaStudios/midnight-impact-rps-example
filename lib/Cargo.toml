@@ -12,6 +12,7 @@ midnight-ledger = { workspace = true }
 coin-structure = { workspace = true }
 midnight-zswap = { workspace = true }
 hex = "0.4.3"
+const-hex = "1.14.0"
 
 [dev-dependencies]
 tokio = { version = "1.41.0", features = ["rt", "macros", "rt-multi-thread"] }
